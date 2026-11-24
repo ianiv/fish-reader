@@ -1,0 +1,8 @@
+.venv/
+__pycache__/
+data/
+config.json
+ios/ArticleReader.xcodeproj/
+ios/build/
+.DS_Store
+xcuserdata/
