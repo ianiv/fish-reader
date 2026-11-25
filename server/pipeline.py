@@ -1,4 +1,4 @@
-"""Article pipeline: fetch -> extract -> split -> tag (ahead) -> render on fish-ui -> package (m4a).
+"""Article pipeline: fetch -> extract -> split -> tag (ahead) -> render with Drama 3 (engine.py) -> package (m4a).
 
 An article lives in <data>/articles/<id>/: article.json (state, below), source.html, parts/NN.wav (until the
 article is joined), parts/NN.m4a, audio.m4a. Each step is skipped when its result is already there, so a retry
@@ -22,8 +22,9 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+import fish_core as core
 import text_rules as tr
-from fish_client import FishClient, FishError
+from engine import Engine, EngineError, Live, write_wav
 from taggers import Tagger, tag_checked
 
 ACTIVE = ("queued", "fetching", "extracting", "tagging", "rendering")
@@ -213,12 +214,13 @@ def new_id() -> str:
 
 
 class Reader:
-    """Article store plus one worker thread that runs articles in order (fish-ui renders one job at a time)."""
+    """Article store plus one worker thread that runs articles in order (the engine renders one take at a time)."""
 
-    def __init__(self, data_dir: Path, fish: FishClient, tagger: Tagger, voice: str | None = None):
+    def __init__(self, data_dir: Path, engine: Engine, tagger: Tagger, voice: str | None = None):
         self.root = Path(data_dir) / "articles"
         self.root.mkdir(parents=True, exist_ok=True)
-        self.fish, self.tagger, self.default_voice = fish, tagger, voice
+        self.engine, self.tagger, self.default_voice = engine, tagger, voice
+        self.lives: dict[tuple[str, int], Live] = {}  # parts rendering now
         self.lock = threading.RLock()
         self.wake = threading.Condition(self.lock)
         self.articles: dict[str, dict] = {}
@@ -285,14 +287,11 @@ class Reader:
         return self.get(a["id"])
 
     def _warm(self):
-        """Load Drama 3 now (if fish-ui unloaded it) so loading overlaps fetching and tagging."""
-        try:
-            self.fish.warm()
-        except FishError:
-            pass
+        """Load Drama 3 now (if it isn't loaded) so loading overlaps fetching and tagging."""
+        self.engine.warm()
 
-    def live_job(self, aid: str, index: int, timeout: float = 120) -> str | None:
-        """The fish-ui job rendering part `index`, waiting up to `timeout` s for it to start. None when the part
+    def live(self, aid: str, index: int, timeout: float = 120) -> Live | None:
+        """Part `index`'s live audio, waiting up to `timeout` s for it to start rendering. None when the part
         is already done (play its m4a), the article is gone, or it failed / timed out."""
         deadline = time.time() + timeout
         with self.lock:
@@ -304,8 +303,9 @@ class Reader:
                     p = a["parts"][index]
                     if p["status"] == "done":
                         return None
-                    if p.get("fish_job") and p["status"] == "rendering":
-                        return p["fish_job"]
+                    live = self.lives.get((aid, index))
+                    if live and p["status"] == "rendering":
+                        return live
                 left = deadline - time.time()
                 if left <= 0:
                     return None
@@ -327,10 +327,7 @@ class Reader:
             a = self.articles.pop(aid, None)
             if not a:
                 return False
-            self.cancelled.add(aid)
-            job = a.get("fish_job")
-        if job:
-            self.fish.cancel(job)
+            self.cancelled.add(aid)  # a running render stops after its current piece
         shutil.rmtree(self.dir(aid), ignore_errors=True)
         return True
 
@@ -351,7 +348,7 @@ class Reader:
                 self.run(a)
             except Cancelled:
                 pass
-            except (StepError, FishError) as e:
+            except (StepError, EngineError, core.RequestError) as e:
                 self._fail(a, str(e))
             except Exception as e:  # noqa: BLE001
                 self._fail(a, f"{type(e).__name__}: {e}")
@@ -387,8 +384,8 @@ class Reader:
             texts = ([intro] if intro else []) + tr.split_parts(art["paragraphs"], first_limit=tr.FIRST_PART_CHARS)
             self.update(a, title=art["title"] or a["url"], byline=art["byline"], site=art["site"], date=art["date"],
                         parts=[{"index": i, "text": t, "tagged": t if (intro and i == 0) else None,
-                                "status": "tagged" if (intro and i == 0) else "pending", "take": None,
-                                "fish_job": None, "duration_s": None, "start_s": None, "audio_url": None,
+                                "status": "tagged" if (intro and i == 0) else "pending",
+                                "continued": False, "gain": None, "duration_s": None, "start_s": None, "audio_url": None,
                                 "warnings": []}
                                for i, t in enumerate(texts)],
                         progress={"parts_done": 0, "parts_total": len(texts)})
@@ -421,36 +418,36 @@ class Reader:
                 continue
             self.update(a, status="rendering", step="render")
             prev = parts[i - 1] if i else None
-            history = [prev["take"]] if prev and prev.get("take") and (prev["duration_s"] or 99) <= tr.MAX_HISTORY_S else []
+            prev_wav = d / "parts" / f"{i - 1:02d}.wav"
+            history = []
+            if prev and prev_wav.exists() and (prev["duration_s"] or 99) <= tr.MAX_HISTORY_S:
+                history = [core.PrevTake(id=f"part {i - 1}", text=prev["tagged"] or prev["text"], wav=str(prev_wav),
+                                         duration_s=prev["duration_s"], voices=[a["voice"]] if a.get("voice") else [],
+                                         gain=prev.get("gain"))]
+            live = Live()
             with self.lock:
                 p["status"] = "rendering"
+                self.lives[(a["id"], i)] = live
+                self.wake.notify_all()  # wakes live() waiters
             try:
-                job = self.fish.submit_tts(p["tagged"] or p["text"], a.get("voice"), history, stream=True)
-            except FishError as e:
-                if history and "previous" in str(e):  # e.g. the take was deleted in fish-ui: go on without it
-                    job = self.fish.submit_tts(p["tagged"] or p["text"], a.get("voice"), stream=True)
-                    p["warnings"].append("couldn't continue from the previous part")
-                else:
-                    raise
-            with self.lock:
-                p["fish_job"] = job["id"]
-                self.update(a, fish_job=job["id"])
-                self.wake.notify_all()  # wakes live_job() waiters
-            job = self.fish.wait(job["id"], should_stop=lambda: a["id"] in self.cancelled)
+                take, warnings = self.engine.render(p["tagged"] or p["text"], a.get("voice"), history, live,
+                                                    should_cancel=lambda: a["id"] in self.cancelled)
+            except core.Cancelled:
+                raise Cancelled() from None
+            except core.RequestError as e:
+                raise StepError(f"part {i + 1}: {e}") from None
+            finally:
+                with self.lock:
+                    self.lives.pop((a["id"], i), None)
             self._check(a)
-            if job["status"] != "done" or not job.get("outputs"):
-                raise StepError(f"fish-ui job {job['status']}: {job.get('error') or 'no audio'} (part {i + 1})")
-            take = job["outputs"][0]
             wav = d / "parts" / f"{i:02d}.wav"
-            self.fish.download(take["url"], wav)
+            gain = write_wav(wav, take)
             to_m4a(wav, d / "parts" / f"{i:02d}.m4a", f"{a['title']} ({i + 1}/{len(parts)})")
             with self.lock:
-                p.update(status="done", take=take["id"], duration_s=round(wav_duration(wav), 3),
-                         audio_url=f"/api/articles/{a['id']}/parts/{i}.m4a",
-                         warnings=p["warnings"] + list(job.get("warnings") or []))
+                p.update(status="done", duration_s=round(wav_duration(wav), 3), gain=gain, continued=bool(history),
+                         audio_url=f"/api/articles/{a['id']}/parts/{i}.m4a", warnings=p["warnings"] + warnings)
                 self._times(a)
                 a["progress"] = {"parts_done": sum(q["status"] == "done" for q in parts), "parts_total": len(parts)}
-                a["fish_job"] = None
                 self._save(a)
                 self.wake.notify_all()
         wavs = [d / "parts" / f"{i:02d}.wav" for i in range(len(parts))]

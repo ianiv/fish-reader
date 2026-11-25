@@ -1,4 +1,4 @@
-"""fish-reader server: turns article URLs into Drama 3 audio via fish-ui. API: docs/API.md.
+"""fish-reader server: turns article URLs into Drama 3 audio (the model runs in this process). API: docs/API.md.
 
 Binds 127.0.0.1 by default; reach it from the phone with `tailscale serve`. Every /api request needs
 `Authorization: Bearer <token>` (config.json `token`, generated on first run).
@@ -6,7 +6,6 @@ Binds 127.0.0.1 by default; reach it from the phone with `tailscale serve`. Ever
 from __future__ import annotations
 
 import argparse
-import array
 import warnings
 warnings.filterwarnings("ignore", message="SOCKS support")
 import hmac
@@ -20,13 +19,15 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from fish_client import FishClient, FishError  # noqa: E402
+import fish_core as core  # noqa: E402
+from engine import Engine  # noqa: E402
 from pipeline import Reader, StepError  # noqa: E402
 from taggers import make_tagger  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
-DEFAULTS = {"host": "127.0.0.1", "port": 8767, "fish_ui_url": "http://127.0.0.1:8766", "data_dir": "./data",
-            "voice": None, "tagger": "claude", "claude_model": "sonnet", "token": None}
+DEFAULTS = {"host": "127.0.0.1", "port": 8767, "data_dir": "./data", "voices_dir": None, "voice": None,
+            "idle_unload_minutes": 15, "warm_on_start": False, "tagger": "claude", "claude_model": "sonnet",
+            "token": None}
 MAX_BODY = 6 * 1024 * 1024  # a shared page (html) can be large
 
 
@@ -44,7 +45,7 @@ def load_config(path: Path) -> dict:
 class Handler(BaseHTTPRequestHandler):
     server_version = "fish-reader/0.1"
     reader: Reader
-    fish: FishClient
+    engine: Engine
     token: str
     tagger_name: str
     quiet = False
@@ -128,39 +129,28 @@ class Handler(BaseHTTPRequestHandler):
     def send_live(self, aid: str, index: int):
         """Part `index` as it renders: 16-bit mono PCM from the start of the part, ending when the part does.
         Waits (up to 2 min) for the part to start; 409 when it's already finished (play its m4a instead)."""
-        job = self.reader.live_job(aid, index)
-        if job is None:
+        live = self.reader.live(aid, index)
+        if live is None:
             a = self.reader.get(aid)
             done = bool(a and index < len(a["parts"]) and a["parts"][index]["status"] == "done")
             return self.error(409 if done else 404, "part is ready: play its audio file" if done else "no live audio for this part")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("X-Sample-Rate", str(live.sample_rate))
+        self.send_header("X-Channels", "1")
+        self.send_header("X-Sample-Format", "s16le")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.close_connection = True
+        pos = 0
         try:
-            src = self.fish.pcm(job)
-        except FishError as e:
-            a = self.reader.get(aid)
-            if a and a["parts"][index]["status"] == "done":
-                return self.error(409, "part is ready: play its audio file")
-            return self.error(502, str(e))
-        with src:
-            rate = src.headers.get("X-Sample-Rate", "44100")
-            self.send_response(200)
-            self.send_header("Content-Type", "application/octet-stream")
-            self.send_header("X-Sample-Rate", rate)
-            self.send_header("X-Channels", "1")
-            self.send_header("X-Sample-Format", "s16le")
-            self.send_header("Cache-Control", "no-store")
-            self.send_header("Connection", "close")
-            self.end_headers()
-            self.close_connection = True
-            rest = b""
-            try:
-                while chunk := src.read1(1 << 15) if hasattr(src, "read1") else src.read(1 << 15):
-                    data = rest + chunk
-                    n = len(data) // 4 * 4
-                    rest = data[n:]
-                    self.wfile.write(f32_to_s16(data[:n]))
-                    self.wfile.flush()
-            except (BrokenPipeError, ConnectionResetError):
-                pass  # the phone stopped listening
+            while (chunk := live.read(pos)) is not None and chunk:
+                self.wfile.write(chunk)
+                self.wfile.flush()
+                pos += len(chunk)
+        except (BrokenPipeError, ConnectionResetError):
+            pass  # the phone stopped listening
 
     # --- routes ---
 
@@ -173,15 +163,10 @@ class Handler(BaseHTTPRequestHandler):
         m = self.command, path
         try:
             if m == ("GET", "/api/health"):
-                try:
-                    status, fish = self.fish.models().get("status"), "ok"
-                except FishError as e:
-                    status, fish = str(e), "down"
-                return self.send_json({"ok": True, "fish_ui": fish, "model": status, "tagger": self.tagger_name})
+                return self.send_json({"ok": True, "model": self.engine.status(), "tagger": self.tagger_name})
             if m == ("GET", "/api/voices"):
-                return self.send_json({"voices": [{"id": v["id"], "name": v.get("name") or v["id"],
-                                                   "description": v.get("description") or ""}
-                                                  for v in self.fish.voices()]})
+                return self.send_json({"voices": [{k: v[k] for k in ("id", "name", "description")}
+                                                  for v in self.engine.voices() if v["has_transcript"]]})
             if m == ("GET", "/api/articles"):
                 return self.send_json({"articles": [summary(a) for a in self.reader.list()]})
             if m == ("POST", "/api/articles"):
@@ -218,24 +203,10 @@ class Handler(BaseHTTPRequestHandler):
                     if pm:
                         return self.send_file(d / "parts" / f"{int(pm.group(1)):02d}.m4a", "audio/mp4")
             return self.error(404, "not found")
-        except StepError as e:
+        except (StepError, core.RequestError) as e:
             return self.error(400, str(e))
-        except FishError as e:
-            return self.error(502, str(e))
 
     do_GET = do_POST = do_DELETE = do_HEAD = route
-
-
-def f32_to_s16(data: bytes) -> bytes:
-    """Little-endian float32 PCM -> little-endian int16 (clipped)."""
-    f = array.array("f")
-    f.frombytes(data)
-    if sys.byteorder != "little":
-        f.byteswap()
-    out = array.array("h", (32767 if x >= 1.0 else -32768 if x <= -1.0 else int(x * 32767) for x in f))
-    if sys.byteorder != "little":
-        out.byteswap()
-    return out.tobytes()
 
 
 def summary(a: dict) -> dict:
@@ -249,24 +220,29 @@ def main():
     p.add_argument("--port", type=int)
     p.add_argument("--host", help="bind address (default 127.0.0.1; use tailscale serve instead of 0.0.0.0)")
     p.add_argument("--data-dir")
-    p.add_argument("--fish-ui-url")
+    p.add_argument("--voices-dir")
     p.add_argument("--quiet", action="store_true")
     args = p.parse_args()
     cfg = load_config(Path(args.config))
-    for k in ("port", "host", "data_dir", "fish_ui_url"):
+    for k in ("port", "host", "data_dir", "voices_dir"):
         if getattr(args, k) is not None:
             cfg[k] = getattr(args, k)
     data_dir = Path(cfg["data_dir"])
     if not data_dir.is_absolute():
         data_dir = (ROOT / data_dir).resolve()
-    fish = FishClient(cfg["fish_ui_url"])
+    voices_dir = Path(cfg["voices_dir"]).expanduser() if cfg.get("voices_dir") else data_dir / "voices"
+    if not voices_dir.is_absolute():
+        voices_dir = (ROOT / voices_dir).resolve()
+    engine = Engine(voices_dir, cfg.get("idle_unload_minutes", 15))
+    if cfg.get("warm_on_start"):
+        engine.warm()
     tagger = make_tagger(cfg)
-    Handler.reader = Reader(data_dir, fish, tagger, cfg.get("voice"))
-    Handler.fish, Handler.token, Handler.tagger_name, Handler.quiet = fish, cfg["token"], tagger.name, args.quiet
+    Handler.reader = Reader(data_dir, engine, tagger, cfg.get("voice"))
+    Handler.engine, Handler.token, Handler.tagger_name, Handler.quiet = engine, cfg["token"], tagger.name, args.quiet
     httpd = ThreadingHTTPServer((cfg["host"], int(cfg["port"])), Handler)
     httpd.daemon_threads = True
-    print(f"fish-reader on http://{cfg['host']}:{cfg['port']}/  (fish-ui {cfg['fish_ui_url']}, tagger {tagger.name}, "
-          f"data {data_dir}; token in {args.config})", flush=True)
+    print(f"fish-reader on http://{cfg['host']}:{cfg['port']}/  (Drama 3{' FAKE' if core.FAKE else ''}, tagger "
+          f"{tagger.name}, data {data_dir}, voices {voices_dir}; token in {args.config})", flush=True)
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

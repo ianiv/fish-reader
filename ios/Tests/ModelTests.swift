@@ -30,8 +30,9 @@ final class ModelTests: XCTestCase {
     }
 
     func testDecodesHealthAndList() throws {
-        let h = try JSONDecoder.api.decode(Health.self, from: Data(#"{"ok": true, "fish_ui": "ok", "model": {}, "tagger": "claude"}"#.utf8))
-        XCTAssertEqual(h.fishUi, "ok")
+        let h = try JSONDecoder.api.decode(Health.self, from: Data(#"{"ok": true, "model": {"key": "drama3", "state": "ready", "error": null, "busy": false}, "tagger": "claude"}"#.utf8))
+        XCTAssertEqual(h.model, Health.Model(state: "ready", error: nil))
+        XCTAssertEqual(h.modelLabel, "Drama 3 loaded")
         XCTAssertEqual(h.tagger, "claude")
         struct List: Decodable { let articles: [Article] }
         let summary = #"{"articles": [{"id": "a", "url": "https://x", "title": "", "status": "queued", "error": null, "created": 1, "progress": {"parts_done": 0, "parts_total": 0}}]}"#

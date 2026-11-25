@@ -1,17 +1,15 @@
-"""Text rules the reader shares with fish-ui (copied from fish-ui/backend/fish_core.py, mlx-audio 0.6.7).
-
-Keep in step with fish_core: MAX_JOB_CHARS, MAX_HISTORY_S, STRUCTURAL_TOKENS, strip_tags, check_text.
-Also: splitting article text into parts, and the word guard that checks a tagger only inserted cues.
+"""Reader text rules on top of fish_core: splitting article text into parts, and the word guard that checks a
+tagger only inserted cues. strip_tags / check_text extend fish_core's for span tags and single-speaker text.
 """
 from __future__ import annotations
 
 import re
 
-MAX_JOB_CHARS = 3000      # fish_core.MAX_JOB_CHARS: characters per job
-MAX_HISTORY_S = 90.0      # fish_core.MAX_HISTORY_S: total audio of previous takes per job
-PART_CHARS = 1100         # reader part size before cues: ~75 s of audio, so the previous part fits MAX_HISTORY_S
+from fish_core import MAX_HISTORY_S, MAX_JOB_CHARS, STRUCTURAL_TOKENS  # noqa: F401  (characters per take; seconds of previous takes)
+
+PART_CHARS = 850          # reader part size before cues: measured ~12 chars/s untagged (1084 chars = 89.5 s), so
+                          # ~70 s, leaving room for pauses and slow spans under MAX_HISTORY_S (90 s) for continuation
 FIRST_PART_CHARS = 400    # the first body part is short so its tagging (and so the first words) come quickly
-STRUCTURAL_TOKENS = ("<|im_start|>", "<|im_end|>", "<|voice|>", "<|text|>", "<|interleave|>", "<|semantic:")
 
 # Point cues: an event at one spot ([sighs] Fine.). sighs/laughs are the model card's examples.
 POINT_CUES = ["sighs", "laughs", "chuckles", "pause"]

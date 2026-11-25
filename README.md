@@ -3,7 +3,7 @@
 Listen to web articles on your iPhone, read by Fish Audio Drama 3 with expression.
 
 ```
-iPhone app ──HTTPS (Tailscale)──▶ fish-reader server (Mac) ──▶ fish-ui (Mac, Drama 3)
+iPhone app ──HTTPS (Tailscale)──▶ fish-reader server (Mac, runs Drama 3 itself)
                                    fetch → extract → mark up delivery → render → m4a
 ```
 
@@ -13,30 +13,37 @@ iPhone app ──HTTPS (Tailscale)──▶ fish-reader server (Mac) ──▶ f
    changing a word: span tags such as `<whisper>…</whisper>`, `<sad>…</sad>` or `<sarcastic>…</sarcastic>` for
    a stretch of words, after which the voice returns to normal narration, and point cues such as `[sighs]` or
    `[pause]`. A guard checks the words and the markup.
-4. fish-ui renders it in parts of about 75 s, each continuing from the previous one so the voice and delivery
-   carry on. The phone starts playing as soon as the first part is ready.
+4. Drama 3 renders it in parts of about 70 s, each continuing from the previous one so the voice and delivery
+   carry on. The phone plays each part live as it's generated, starting with the spoken title.
 
 ## Mac setup
 
-Needs [fish-ui](../fish-ui) (running, with its own venv), `ffmpeg`, the `claude` CLI (logged in) and Tailscale.
+Needs an Apple silicon Mac with about 30 GB free for Drama 3 (4-bit, mlx-audio 0.6.7), `ffmpeg`, the `claude`
+CLI (logged in) and Tailscale. fish-ui isn't needed: its generation code is copied into `server/fish_core.py`
+(see its docstring) and `server/engine.py` runs it in-process. Don't run both with the model loaded at once.
 
 ```sh
-uv venv --python 3.13 .venv && uv pip install --python .venv/bin/python trafilatura
-(cd ../fish-ui && ./fish-ui)      # Drama 3 on 127.0.0.1:8766
+uv venv --python 3.13 .venv && uv pip install --python .venv/bin/python -r requirements.txt
 ./fish-reader                     # 127.0.0.1:8767; writes config.json with a token on first run
 tailscale serve --bg --https=443 http://127.0.0.1:8767
 ```
 
+The weights (`mlx-community/fish-audio-drama-3-4bit`) download to the Hugging Face cache on first use. The model
+loads with the first article (about 10 s) and unloads after `idle_unload_minutes` without work.
+
 The phone then uses `https://<mac-name>.<tailnet>.ts.net` and the `token` from `config.json`. The server only
 binds to 127.0.0.1; `tailscale serve` gives tailnet-only HTTPS with a real certificate.
 
-`config.json` (see `config.example.json`): `fish_ui_url`, `port`, `data_dir`, `voice` (default narrator: a
-fish-ui library voice id; `null` lets the model pick one, and continuation keeps it), `tagger`
-(`claude` | `none`), `claude_model` (default `sonnet`), `token`. `FISH_READER_TAGGER=fake|none` overrides the
-tagger.
+`config.json` (see `config.example.json`): `port`, `data_dir`, `voices_dir` (default `<data_dir>/voices`),
+`voice` (default narrator: a voice id; `null` lets the model pick one, and continuation keeps it),
+`idle_unload_minutes` (default 15, 0 = never), `warm_on_start`, `tagger` (`claude` | `none`), `claude_model`
+(default `sonnet`), `token`. `FISH_READER_TAGGER=fake|none` overrides the tagger; `FISH_READER_FAKE_MODEL=1`
+runs a stub model that makes test tones.
 
-A library voice gives the steadiest narrator across a long article: record or upload one in fish-ui's Library,
-then pick it in the app's Settings.
+A voice gives the steadiest narrator across a long article. Voices use fish-ui's folder layout:
+`<voices_dir>/<id>/voice.json` (`{name, description}`), `reference.wav` and `transcript.txt` (needed; voices
+without one aren't offered). Copy them from fish-ui's `data/voices`, or point `voices_dir` there, then pick one
+in the app's Settings.
 
 ## iOS app
 
@@ -61,8 +68,7 @@ extension share the server URL and token through the app group.
 IOS_DESTINATION="platform=iOS Simulator,name=iPhone 17 Pro" ./scripts/check.sh   # also runs the iOS unit tests
 ```
 
-The smoke test runs fish-ui's fake model (from `$FISH_UI_DIR`, default `~/Code/fish-ui`) and a fake tagger
-against a cluttered local article page. It never loads the real model or calls Claude.
+The smoke test runs the reader with the fake model and a fake tagger against a cluttered local article page. It never loads the real model or calls Claude.
 
 ## Cues
 
@@ -79,4 +85,5 @@ behind the same `Tagger` interface.
 ## License
 
 MIT (this code). Drama 3's weights are under the
-[Fish Audio Community License](https://huggingface.co/fishaudio/drama-3/blob/main/LICENSE), see fish-ui's README.
+[Fish Audio Community License](https://huggingface.co/fishaudio/drama-3/blob/main/LICENSE), which applies to any audio you make with them.
+`server/fish_core.py` comes from fish-ui (MIT, same author).

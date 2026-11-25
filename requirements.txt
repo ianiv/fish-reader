@@ -1,0 +1,6 @@
+# fish-reader's .venv (Python 3.13). Drama 3 code (server/fish_core.py) is pinned to mlx-audio 0.6.7.
+mlx-audio==0.6.7
+mlx==0.32.4
+numpy==2.5.5
+transformers==5.24.0
+trafilatura==2.4.0

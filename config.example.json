@@ -1,9 +1,11 @@
 {
   "host": "127.0.0.1",
   "port": 8767,
-  "fish_ui_url": "http://127.0.0.1:8766",
   "data_dir": "./data",
+  "voices_dir": null,
   "voice": null,
+  "idle_unload_minutes": 15,
+  "warm_on_start": false,
   "tagger": "claude",
   "claude_model": "sonnet",
   "token": null

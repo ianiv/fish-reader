@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """fish-reader smoke test (no model weights, no Claude): unit checks of text_rules / taggers / extraction, then
-fish-ui with FISH_UI_FAKE_MODEL=1 (from $FISH_UI_DIR, default ~/Code/fish-ui) and the reader with the fake
-tagger, each on a random port with temp dirs, plus a local page server with a cluttered article fixture."""
+the reader with the fake model (FISH_READER_FAKE_MODEL=1) and the fake tagger on a random port with temp dirs,
+plus a local page server with a cluttered article fixture."""
 from __future__ import annotations
 
 import warnings
@@ -21,7 +21,6 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "server"))
-FISH_UI = Path(os.environ.get("FISH_UI_DIR") or Path.home() / "Code" / "fish-ui")
 
 import pipeline  # noqa: E402
 import taggers  # noqa: E402
@@ -42,6 +41,17 @@ FIXTURE = f"""<!doctype html><html><head><title>The Keeper Comes Home | Harbour 
 <figure><img src="x.jpg"><figcaption>CAPTION-JUNK The pier at dawn.</figcaption></figure></article></main>
 <section class="comments"><h2>Comments</h2><p>COMMENT-JUNK First! This is so wrong it hurts my eyes.</p></section>
 <footer>FOOTER-JUNK © 2026 Harbour News. All rights reserved. Privacy policy.</footer></body></html>"""
+
+
+def write_tone(path: Path, seconds: float = 1.0):
+    import math
+    import struct
+    import wave
+    with wave.open(str(path), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(44100)
+        w.writeframes(b"".join(struct.pack("<h", int(8000 * math.sin(i / 20))) for i in range(int(44100 * seconds))))
 
 
 def free_port() -> int:
@@ -121,10 +131,6 @@ def wait_up(fn, what):
 
 
 def check_servers():
-    fish_py = FISH_UI / ".venv" / "bin" / "python"
-    if not fish_py.exists():
-        print(f"SKIP server checks: no fish-ui venv at {fish_py} (set FISH_UI_DIR)")
-        return
     page_port = free_port()
 
     class Page(http.server.BaseHTTPRequestHandler):
@@ -144,23 +150,23 @@ def check_servers():
     procs = []
     with tempfile.TemporaryDirectory(prefix="fish-reader-smoke-") as tmp:
         tmp = Path(tmp)
-        fish_port, port = free_port(), free_port()
-        (tmp / "fish.json").write_text("{}")
-        procs.append(subprocess.Popen(
-            [str(fish_py), str(FISH_UI / "backend" / "server.py"), "--port", str(fish_port), "--data-dir",
-             str(tmp / "fish-data"), "--idle-unload-minutes", "0"],
-            env=dict(os.environ, FISH_UI_FAKE_MODEL="1", FISH_UI_FAKE_DELAY="0.01", FISH_UI_CONFIG=str(tmp / "fish.json")),
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True))
+        port = free_port()
+        voice = tmp / "data" / "voices" / "narrator"
+        voice.mkdir(parents=True)
+        (voice / "voice.json").write_text(json.dumps({"name": "Narrator", "description": "test tone"}))
+        (voice / "transcript.txt").write_text("Hello there.\n")
+        write_tone(voice / "reference.wav")
+        (tmp / "data" / "voices" / "untranscribed").mkdir()
+        (tmp / "data" / "voices" / "untranscribed" / "voice.json").write_text("{}")
+        write_tone(tmp / "data" / "voices" / "untranscribed" / "reference.wav")
         cfg = tmp / "reader.json"
-        cfg.write_text(json.dumps({"port": port, "fish_ui_url": f"http://127.0.0.1:{fish_port}",
-                                   "data_dir": str(tmp / "data")}))
+        cfg.write_text(json.dumps({"port": port, "data_dir": str(tmp / "data"), "voice": "narrator"}))
         procs.append(subprocess.Popen(
             [sys.executable, str(ROOT / "server" / "server.py"), "--config", str(cfg), "--quiet"],
-            env=dict(os.environ, FISH_READER_TAGGER="fake", FISH_READER_ALLOW_HOSTS=f"127.0.0.1:{page_port}"),
+            env=dict(os.environ, FISH_READER_TAGGER="fake", FISH_READER_ALLOW_HOSTS=f"127.0.0.1:{page_port}",
+                     FISH_READER_FAKE_MODEL="1", FISH_READER_FAKE_DELAY="0.01"),
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True))
         try:
-            Api(fish_port, None)
-            wait_up(lambda: Api(fish_port, None).call("GET", "/api/settings"), "fish-ui")
             token = None
             for _ in range(50):
                 token = json.loads(cfg.read_text()).get("token")
@@ -170,12 +176,12 @@ def check_servers():
             assert token, "reader didn't write a token"
             api = Api(port, token)
             health = wait_up(lambda: api.call("GET", "/api/health"), "reader")
-            assert health["fish_ui"] == "ok" and health["tagger"] == "fake", health
+            assert health["model"]["fake"] and health["model"]["state"] in ("empty", "ready") and health["tagger"] == "fake", health
             assert api.status("GET", "/api/articles", token=False) == 401
             assert Api(port, "wrong").status("GET", "/api/articles") == 401
             assert api.status("POST", "/api/articles", {"url": "http://127.0.0.1:1/"}) == 400, "SSRF guard"
             assert api.status("POST", "/api/articles", {}) == 400
-            assert api.call("GET", "/api/voices")["voices"] == []
+            assert api.call("GET", "/api/voices")["voices"] == [{"id": "narrator", "name": "Narrator", "description": "test tone"}]
 
             a = api.call("POST", "/api/articles", {"url": f"http://127.0.0.1:{page_port}/keeper"})
             assert a["status"] == "queued", a
@@ -197,15 +203,13 @@ def check_servers():
             assert parts[1]["text"].startswith("The harbour") and len(parts[1]["text"]) <= tr.FIRST_PART_CHARS, parts[1]
             assert all(p["tagged"].startswith("[sighs] ") and p["status"] == "done" for p in parts[1:])
             assert any("[pause]" in p["tagged"] for p in parts)
-            assert any("<emphasis>" in p["tagged"] for p in parts), "span tags reach fish-ui"
+            assert any("<emphasis>" in p["tagged"] for p in parts), "span tags reach the model"
             assert all(p["start_s"] is not None for p in parts) and parts[0]["start_s"] == 0
             total = sum(p["duration_s"] for p in parts)
             assert abs(a["duration_s"] - total) < 0.01 and total > 0, (a["duration_s"], total)
             # chained continuation: each part after the first continued from the previous take
-            for prev, p in zip(parts, parts[1:]):
-                wf, stem = p["take"].split("/")
-                side = Api(fish_port, None).call("GET", f"/api/history/{wf}/{stem}")
-                assert side["previous_takes"] == [prev["take"]], side.get("previous_takes")
+            assert not parts[0]["continued"] and all(p["continued"] for p in parts[1:]), [p["continued"] for p in parts]
+            assert a["voice"] == "narrator"
             st, hdr, audio = api.call("GET", a["audio_url"], raw=True)
             assert st == 200 and hdr["Content-Type"] == "audio/mp4" and audio[4:8] == b"ftyp", (st, hdr)
             st, hdr, piece = api.call("GET", parts[1]["audio_url"], raw=True, headers={"Range": "bytes=0-99"})
@@ -217,8 +221,7 @@ def check_servers():
             live_s = len(live) / 2 / 44100
             assert abs(live_s - parts[2]["duration_s"]) < 0.2, (live_s, parts[2]["duration_s"])
             assert api.status("GET", f"/api/articles/{a['id']}/parts/2/live") == 409, "finished part: play the file"
-            jobs = Api(fish_port, None).call("GET", "/api/jobs")["jobs"]
-            assert all(j["stream"] for j in jobs if j["workflow"] == "tts"), "reader jobs stream"
+            assert api.call("GET", "/api/health")["model"]["state"] == "ready"
             listed = api.call("GET", "/api/articles")["articles"]
             assert [x["id"] for x in listed][-1] == a["id"] and "parts" not in listed[0]
 

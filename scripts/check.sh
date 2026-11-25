@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Quality gate: compile the server, run the smoke test (fake fish-ui + fake tagger), build + test the iOS app
+# Quality gate: compile the server, run the smoke test (fake model + fake tagger), build + test the iOS app
 # when Xcode and xcodegen are present (SKIP_IOS=1 skips it).
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")/.." && pwd)"

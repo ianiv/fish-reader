@@ -402,8 +402,8 @@ struct SettingsView: View {
         do {
             let h = try await client.health()
             voices = (try? await client.voices()) ?? []
-            ok = h.fishUi == "ok"
-            status = ok ? "Connected (tagger: \(h.tagger))" : "Reader is up, but fish-ui isn't running on the Mac"
+            ok = h.model.state != "error"
+            status = ok ? "Connected. \(h.modelLabel), tagger: \(h.tagger)" : "Reader is up, but \(h.modelLabel)"
             save()
         } catch {
             ok = false

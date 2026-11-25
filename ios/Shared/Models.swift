@@ -74,9 +74,22 @@ struct Voice: Codable, Identifiable, Hashable {
 }
 
 struct Health: Codable {
+    struct Model: Codable, Equatable {
+        var state: String  // empty | loading | warming | ready | idle-unloaded | error
+        var error: String?
+    }
     var ok: Bool
-    var fishUi: String
+    var model: Model
     var tagger: String
+
+    var modelLabel: String {
+        switch model.state {
+        case "ready": "Drama 3 loaded"
+        case "loading", "warming": "Drama 3 loading"
+        case "error": "Drama 3 failed to load: \(model.error ?? "unknown error")"
+        default: "Drama 3 loads with the first article"
+        }
+    }
 }
 
 /// Marked-up text split into runs: plain text, [point] cues and <tag>…</tag> spans (no nesting).

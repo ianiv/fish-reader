@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
-# Starts the fish-reader server with the repo's .venv Python. fish-ui (./fish-ui in ../fish-ui) must be running.
-# Usage: ./fish-reader [--port 8767] [--data-dir ./data] [--fish-ui-url http://127.0.0.1:8766] [--config config.json]
+# Starts the fish-reader server (Drama 3 runs in it) with the repo's .venv Python.
+# Usage: ./fish-reader [--port 8767] [--data-dir ./data] [--voices-dir DIR] [--config config.json]
 # FISH_READER_TAGGER=fake|none overrides the tagger (default from config: claude, i.e. `claude -p`).
+# FISH_READER_FAKE_MODEL=1 runs a stub model (test tones, no weights).
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 PY="${FISH_READER_PYTHON:-$HERE/.venv/bin/python}"
 if [ ! -x "$PY" ]; then
-  echo "fish-reader: no venv. Create it: uv venv --python 3.13 .venv && uv pip install --python .venv/bin/python trafilatura" >&2
+  echo "fish-reader: no venv. Create it: uv venv --python 3.13 .venv && uv pip install --python .venv/bin/python -r requirements.txt" >&2
   exit 1
 fi
-exec "$PY" "$HERE/server/server.py" "$@"
+export HF_HUB_DISABLE_PROGRESS_BARS=1
+exec "$PY" "$HERE/server/server.py" "$@" 2> >(grep --line-buffered -v -E "instantiate a model of type|Warning:|warnings.warn|SOCKS support" >&2)
