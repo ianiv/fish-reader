@@ -177,6 +177,7 @@ final class PlayerController {
         isPlaying = false
         isWaiting = false
         node.pause()
+        engine.pause()  // a running engine counts as playing to iOS: the lock screen would keep showing Pause
         if let id = article?.id { savePosition(id) }
         updateNowPlaying()
     }
@@ -238,6 +239,7 @@ final class PlayerController {
 
     private func stopAll() {
         resetNode()
+        engine.pause()
         source?.live?.cancel()
         source = nil
         isWaiting = false
