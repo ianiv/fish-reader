@@ -171,7 +171,20 @@ struct ArticleView: View {
     @Environment(ArticleStore.self) private var store
     @Environment(PlayerController.self) private var player
 
+    @State private var scrolled = false
+
     private var article: Article? { store.details[id] ?? store.articles.first { $0.id == id } }
+
+    /// The part holding the playhead: the player's, if it has this article, else from the saved position.
+    private func playheadPart(_ a: Article) -> Int {
+        if player.article?.id == a.id { return player.currentPart }
+        var t = UserDefaults.standard.double(forKey: "pos.\(a.id)")
+        for p in a.parts ?? [] {
+            guard let d = p.durationS, t >= d else { return p.index }
+            t -= d
+        }
+        return max(0, (a.parts?.count ?? 1) - 1)
+    }
 
     var body: some View {
         Group {
@@ -220,6 +233,14 @@ struct ArticleView: View {
             }
             .onChange(of: player.currentPart) { _, n in
                 if player.article?.id == a.id, player.isPlaying { withAnimation { proxy.scrollTo(n, anchor: .top) } }
+            }
+            .task(id: a.parts?.count ?? 0) {  // on opening: jump to the part the playhead is in, once the parts are in
+                guard !scrolled, let parts = a.parts, !parts.isEmpty else { return }
+                scrolled = true
+                let n = playheadPart(a)
+                guard n > 0 else { return }
+                try? await Task.sleep(for: .milliseconds(50))  // let the parts lay out first
+                proxy.scrollTo(n, anchor: .top)
             }
         }
         .safeAreaInset(edge: .bottom) {
