@@ -503,7 +503,9 @@ struct SettingsView: View {
     }
 }
 
-func formatTime(_ s: Double) -> String {
+/// An audio time as listening time: at the 1× speed (PlayerController.baseSpeed) that's real time.
+func formatTime(_ audioSeconds: Double) -> String {
+    let s = audioSeconds / Double(PlayerController.baseSpeed)
     guard s.isFinite, s > 0 else { return "0:00" }
     let t = Int(s.rounded())
     return t >= 3600 ? String(format: "%d:%02d:%02d", t / 3600, t / 60 % 60, t % 60) : String(format: "%d:%02d", t / 60, t % 60)

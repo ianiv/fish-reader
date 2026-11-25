@@ -19,6 +19,9 @@ final class PlayerController {
     private(set) var isPlaying = false
     private(set) var isWaiting = false  // playing, but the audio isn't there yet (part starting / buffering)
     var isLive: Bool { source?.live != nil }
+    /// Drama 3 narrates slowly, so the speed shown as 1× plays at 1.2× (and 1.5× at 1.8×, and so on).
+    static let baseSpeed: Float = 1.2
+    /// The speed the user picked, relative to baseSpeed.
     var rate: Float = 1.0 {
         didSet {
             guard rate != oldValue else { return }
@@ -29,6 +32,9 @@ final class PlayerController {
             updateNowPlaying()
         }
     }
+
+    /// The actual playback speed.
+    private var speed: Float { rate * Self.baseSpeed }
 
     /// The part being fed to the engine: decoded file samples, or a live stream that is still growing.
     private struct Source {
@@ -182,7 +188,9 @@ final class PlayerController {
         updateNowPlaying()
     }
 
+    /// Skip by `seconds` of listening time (at 1×), i.e. seconds * baseSpeed of audio.
     func skip(_ seconds: Double) {
+        let seconds = seconds * Double(Self.baseSpeed)
         updateClock()
         let limit = livePartIndex.flatMap { i in start(of: i).map { $0 + liveAvailable(i) } } ?? readyDuration
         seek(to: max(0, min(time + seconds, max(0, limit - 0.5))), play: isPlaying)
@@ -264,7 +272,7 @@ final class PlayerController {
         cursor = Int(offset * s.sampleRate)
         if s.live == nil { cursor = min(cursor, s.samples.count) }
         flushed = false
-        stretcher = SpeechStretcher(sampleRate: s.sampleRate, speed: rate, start: cursor)
+        stretcher = SpeechStretcher(sampleRate: s.sampleRate, speed: speed, start: cursor)
         isWaiting = isPlaying
         configure(s.sampleRate)
         feed()
@@ -301,7 +309,7 @@ final class PlayerController {
         }
         cursor = 0
         flushed = false
-        stretcher = SpeechStretcher(sampleRate: source!.sampleRate, speed: rate)
+        stretcher = SpeechStretcher(sampleRate: source!.sampleRate, speed: speed)
         decoded = decoded.filter { $0.key >= next }
         prepare(next + 1)
         return true
@@ -511,7 +519,7 @@ final class PlayerController {
         c.skipBackwardCommand.addTarget { [weak self] _ in MainActor.assumeIsolated { self?.skip(-15) }; return .success }
         c.changePlaybackPositionCommand.addTarget { [weak self] e in
             guard let e = e as? MPChangePlaybackPositionCommandEvent else { return .commandFailed }
-            MainActor.assumeIsolated { self?.seek(to: e.positionTime, play: self?.isPlaying ?? false) }
+            MainActor.assumeIsolated { self?.seek(to: e.positionTime * Double(Self.baseSpeed), play: self?.isPlaying ?? false) }
             return .success
         }
     }
@@ -521,8 +529,9 @@ final class PlayerController {
         MPNowPlayingInfoCenter.default().nowPlayingInfo = [
             MPMediaItemPropertyTitle: a.displayTitle,
             MPMediaItemPropertyArtist: a.byline?.isEmpty == false ? a.byline! : (a.site ?? ""),
-            MPMediaItemPropertyPlaybackDuration: max(duration, time),
-            MPNowPlayingInfoPropertyElapsedPlaybackTime: time,
+            // in listening time (audio time / baseSpeed), like the app shows it
+            MPMediaItemPropertyPlaybackDuration: max(duration, time) / Double(Self.baseSpeed),
+            MPNowPlayingInfoPropertyElapsedPlaybackTime: time / Double(Self.baseSpeed),
             MPNowPlayingInfoPropertyPlaybackRate: isPlaying && !isWaiting ? Double(rate) : 0,
         ]
     }
