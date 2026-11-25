@@ -111,6 +111,8 @@ struct AddArticleView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var url = ""
     @State private var busy = false
+    @State private var voice = ReaderSettings.voice ?? ""  // "" = the server's default
+    @State private var voices: [Voice] = []
     var opened: (String) -> Void
 
     var body: some View {
@@ -122,6 +124,15 @@ struct AddArticleView: View {
                 } footer: {
                     Text("Members-only posts: open them in Safari while signed in and use Share → Read Aloud instead.")
                 }
+                Section {
+                    Picker("Voice", selection: $voice) {
+                        Text("Server default").tag("")
+                        ForEach(voices) { Text($0.name).tag($0.id) }
+                        if !voice.isEmpty, !voices.contains(where: { $0.id == voice }) { Text(voice).tag(voice) }
+                    }
+                } footer: {
+                    Text("Starts on the narrator chosen in Settings.")
+                }
                 if let e = store.error { Text(e).foregroundStyle(.red).font(.footnote) }
             }
             .navigationTitle("Add article")
@@ -132,7 +143,7 @@ struct AddArticleView: View {
                     Button("Read") {
                         busy = true
                         Task {
-                            if let a = await store.add(url: url) {
+                            if let a = await store.add(url: url, voice: voice.isEmpty ? nil : voice) {
                                 PlayerController.shared.open(a)
                                 PlayerController.shared.play()  // starts live as soon as the first part renders
                                 dismiss()
@@ -144,6 +155,7 @@ struct AddArticleView: View {
                     .disabled(busy || URL(string: url)?.scheme?.hasPrefix("http") != true)
                 }
             }
+            .task { voices = (try? await APIClient()?.voices()) ?? [] }
             .onAppear {
                 if url.isEmpty, UIPasteboard.general.hasURLs, let u = UIPasteboard.general.url { url = u.absoluteString }
             }
