@@ -6,3 +6,4 @@ ios/ArticleReader.xcodeproj/
 ios/build/
 .DS_Store
 xcuserdata/
+ios/Local.xcconfig

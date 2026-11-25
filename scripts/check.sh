@@ -6,7 +6,8 @@ HERE="$(cd "$(dirname "$0")/.." && pwd)"
 PY="${FISH_READER_PYTHON:-$HERE/.venv/bin/python}"
 cd "$HERE"
 echo "== py_compile"
-"$PY" -m py_compile server/*.py scripts/smoke.py
+"$PY" -m py_compile server/*.py scripts/*.py
+/usr/bin/python3 -m py_compile scripts/setup.py scripts/common.py  # setup runs on macOS's Python 3.9
 echo "== smoke"
 "$PY" scripts/smoke.py 2>&1 | grep -v '^\[' 
 if [ "${SKIP_IOS:-}" != "1" ] && command -v xcodebuild >/dev/null && command -v xcodegen >/dev/null; then

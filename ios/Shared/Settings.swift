@@ -4,7 +4,7 @@ import Security
 /// Connection settings shared by the app and the share extension through the app group: the server URL in the
 /// group's UserDefaults, the token in the group's keychain.
 enum ReaderSettings {
-    static let appGroup: String = Bundle.main.object(forInfoDictionaryKey: "AppGroup") as? String ?? "group.ca.blogaholics.FishReader"
+    static let appGroup: String = Bundle.main.object(forInfoDictionaryKey: "AppGroup") as? String ?? ""
     static var defaults: UserDefaults { UserDefaults(suiteName: appGroup) ?? .standard }
 
     static var serverURL: String {

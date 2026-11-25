@@ -1,76 +1,141 @@
 # fish-reader
 
-Listen to web articles on your iPhone, read by Fish Audio Drama 3 with expression.
+Listen to web articles on your iPhone, read aloud with expression by
+[Fish Audio Drama 3](https://huggingface.co/fishaudio/drama-3) running on your own Mac.
 
 ```
-iPhone app ──HTTPS (Tailscale)──▶ fish-reader server (Mac, runs Drama 3 itself)
-                                   fetch → extract → mark up delivery → render → m4a
+iPhone app ──HTTPS over your tailnet──▶ fish-reader server on your Mac (runs Drama 3)
+                                         fetch → find the article → mark up delivery → read aloud → m4a
 ```
 
-1. The phone sends a URL (or, from Safari's share sheet, the page itself, so members-only posts work).
-2. The server finds the article text (trafilatura), leaving out menus, ads, comments and reference lists.
-3. Claude (`claude -p`, the Claude Code CLI with its own login, no API key) marks up the delivery without
-   changing a word: span tags such as `<whisper>…</whisper>`, `<sad>…</sad>` or `<sarcastic>…</sarcastic>` for
-   a stretch of words, after which the voice returns to normal narration, and point cues such as `[sighs]` or
-   `[pause]`. A guard checks the words and the markup.
-4. Drama 3 renders it in parts of about 70 s, each continuing from the previous one so the voice and delivery
-   carry on. The phone plays each part live as it's generated, starting with the spoken title.
+1. Share a page from Safari (or paste a link). Shared pages are sent as you see them, so members-only posts work.
+2. The server finds the article text, leaving out menus, ads, comments and reference lists.
+3. Claude (optional, through the Claude Code CLI and its own login) marks up the delivery without changing a
+   word: `<whisper>…</whisper>`, `<sad>…</sad>`, `[sighs]`, `[pause]` and so on.
+4. Drama 3 reads it in parts of about 70 s, each continuing from the last so the voice carries on. The phone
+   starts playing about a second after the first part starts rendering.
 
-## Mac setup
+Everything stays on your devices: the server only listens on the Mac itself, and Tailscale makes it reachable
+from your phone and nobody else.
 
-Needs an Apple silicon Mac with about 30 GB free for Drama 3 (4-bit, mlx-audio 0.6.7), `ffmpeg`, the `claude`
-CLI (logged in) and Tailscale. fish-ui isn't needed: its generation code is copied into `server/fish_core.py`
-(see its docstring) and `server/engine.py` runs it in-process. Don't run both with the model loaded at once.
+## What you need
+
+- **A Mac with Apple silicon (M1 or later) and at least 32 GB of memory.** Drama 3 uses about 27 GB while it
+  reads, and the model is a ~22 GB download.
+- **An iPhone on iOS 26**, and **Xcode** on the Mac to build the app (you build it yourself; it isn't in the App
+  Store).
+- **[Tailscale](https://tailscale.com/download)** on the Mac and the iPhone, signed in to the same account (free
+  for personal use).
+- [Homebrew](https://brew.sh) for the tools: `brew install uv ffmpeg xcodegen`
+- Optional: **[Claude Code](https://claude.com/claude-code)**, logged in (run `claude` once). Without it articles
+  are read without the expressive markup.
+
+## Set up the Mac
 
 ```sh
-uv venv --python 3.13 .venv && uv pip install --python .venv/bin/python -r requirements.txt
-./fish-reader                     # 127.0.0.1:8767; writes config.json with a token on first run
-tailscale serve --bg --https=443 http://127.0.0.1:8767
+git clone <this repo> fish-reader && cd fish-reader
+./fish-reader setup
 ```
 
-The weights (`mlx-community/fish-audio-drama-3-4bit`) download to the Hugging Face cache on first use. The model
-loads with the first article (about 10 s) and unloads after `idle_unload_minutes` without work.
+The setup script walks through everything and can be run again at any time:
 
-The phone then uses `https://<mac-name>.<tailnet>.ts.net` and the `token` from `config.json`. The server only
-binds to 127.0.0.1; `tailscale serve` gives tailnet-only HTTPS with a real certificate.
+1. checks the Mac and the tools,
+2. creates the Python environment (`.venv`),
+3. checks your Claude login,
+4. downloads the Drama 3 model,
+5. **adds your first voice**: record yourself reading a short passage, or use a 10–30 s clip of someone
+   speaking (it can transcribe the clip for you),
+6. turns on `tailscale serve`, which gives the server an HTTPS address only your devices can reach,
+7. writes your iOS build settings (`ios/Local.xcconfig`),
+8. shows a **QR code** for connecting the phone.
 
-`config.json` (see `config.example.json`): `port`, `data_dir`, `voices_dir` (default `<data_dir>/voices`),
-`voice` (default narrator: a voice id; `null` lets the model pick one, and continuation keeps it),
-`idle_unload_minutes` (default 15, 0 = never), `warm_on_start`, `tagger` (`claude` | `none`), `claude_model`
-(default `sonnet`), `token`. `FISH_READER_TAGGER=fake|none` overrides the tagger; `FISH_READER_FAKE_MODEL=1`
-runs a stub model that makes test tones.
+Then start the server and leave it running:
 
-A voice gives the steadiest narrator across a long article. Voices use fish-ui's folder layout:
-`<voices_dir>/<id>/voice.json` (`{name, description}`), `reference.wav` and `transcript.txt` (needed; voices
-without one aren't offered). Copy them from fish-ui's `data/voices`, or point `voices_dir` there, then pick one
-in the app's Settings.
+```sh
+./fish-reader
+```
 
-## iOS app
+The model loads with the first article (about 15 s) and unloads after a few minutes without work, so it only
+uses memory while it reads.
+
+## Build the iPhone app
 
 ```sh
 cd ios && xcodegen generate && open ArticleReader.xcodeproj
 ```
 
-`ArticleReader.xcodeproj` is generated (and gitignored): change settings in `ios/project.yml`, not in Xcode, or the next `xcodegen generate` drops them. Before running on your phone, check `DEVELOPMENT_TEAM` (currently `7EN8DG9MKN`) and, if you like,
-`BUNDLE_PREFIX` / `APP_GROUP` in `ios/project.yml`, then regenerate. The app and the **Read Aloud** share
-extension share the server URL and token through the app group.
+Connect your iPhone, pick it at the top of the Xcode window, and press Run (⌘R). The first time, enable
+Developer Mode on the phone (Settings → Privacy & Security) and trust your developer certificate (Settings →
+General → VPN & Device Management) when asked.
 
-- Library of articles with progress; `+` pastes a link.
-- Safari → Share → **Read Aloud** sends the page as you see it (signed in), so paid posts work.
-- Article view: text with cues shown dimmed and tagged spans in italics, the current part highlighted, tap a part to jump there.
-- Player: play/pause, ±15 s, 0.8–2× speed, lock screen controls, background audio, remembers your place.
-  Parts are cached on the phone, so finished articles play offline.
+Signing uses `ios/Local.xcconfig` (written by setup; see `ios/Local.example.xcconfig`): your team ID and a bundle
+ID prefix you own, such as `com.yourname`. With a free Apple ID the app expires after 7 days: run it from Xcode
+again. If Xcode says your team can't use App Groups (the app shares its settings with the share extension
+through one), you need a paid Apple Developer account.
 
-## Quality gate
+## Connect the phone
+
+On the Mac run `./fish-reader pair`, then scan the QR code with the iPhone's **Camera** app and tap the link:
+Reader opens and asks to connect. Or type the server address and token it prints into Reader → Settings.
+
+## Using it
+
+- **Add an article**: `+` in the app (it offers a copied link), or Safari → Share → **Reader**. Both let you pick
+  the voice. Use Share for paid posts you're signed in to.
+- **Listen**: it starts while the article is still being made. ±15 s, 0.8–2× speed (pitch-preserving, tuned for
+  speech), lock screen and AirPods controls, background audio, and it remembers your place. Finished articles
+  play offline.
+- **Pause an article** that's being made (swipe right in the library, or the ••• menu) to free the Mac's GPU;
+  resume later. If you quit the server, unfinished articles carry on when it starts again.
+- **Voices**: `./fish-reader add-voice` adds another; choose the default in Settings or per article.
+
+**Only use voices you have the right to use**: your own, or someone who agreed to have their voice cloned. Don't
+use it to impersonate anyone.
+
+## Configuration
+
+`config.json` (created by setup; see `config.example.json`):
+
+| key | default | |
+|---|---|---|
+| `port` | 8767 | the server listens on 127.0.0.1 only |
+| `data_dir` | `./data` | articles and voices |
+| `voices_dir` | `<data_dir>/voices` | one folder per voice: `voice.json`, `reference.wav`, `transcript.txt` |
+| `voice` | `null` | default narrator (a voice folder name); `null` lets the model pick |
+| `idle_unload_minutes` | 15 | free the model's memory after this long without work (0 = never) |
+| `warm_on_start` | `false` | load the model when the server starts |
+| `tagger` | `claude` | `claude` (falls back to `none` when Claude Code isn't installed or logged in) or `none` |
+| `claude_model` | `sonnet` | model for the markup |
+| `token` | generated | the app's password; keep it private |
+
+Articles live in `data/articles/<id>/` (`parts/NN.m4a` per part, `audio.m4a` once finished).
+
+## Troubleshooting
+
+- **The app can't connect**: is `./fish-reader` running? Is Tailscale on, on both devices? `./fish-reader pair`
+  warns when `tailscale serve` isn't set up. In the Tailscale admin console, MagicDNS and HTTPS certificates must
+  be on.
+- **"Couldn't load Drama 3" / the Mac runs out of memory**: close other big apps; don't run another copy of
+  Drama 3 (such as fish-ui) with its model loaded at the same time.
+- **No expressive markup**: the server log says why at startup (usually: Claude Code isn't logged in).
+- **The iOS Simulator says "audio route descriptor"** (developers): coreaudiod is stuck; `sudo killall coreaudiod`.
+
+## For developers
 
 ```sh
 ./scripts/check.sh                 # py_compile, smoke test, iOS compile (app + extension + tests)
 IOS_DESTINATION="platform=iOS Simulator,name=iPhone 17 Pro" ./scripts/check.sh   # also runs the iOS unit tests
 ```
 
-The smoke test runs the reader with the fake model and a fake tagger against a cluttered local article page. It never loads the real model or calls Claude.
+The smoke test runs the server with a fake model (test tones) and a fake tagger against a cluttered local page;
+it never loads the real model or calls Claude. `FISH_READER_FAKE_MODEL=1` and `FISH_READER_TAGGER=fake|none`
+work for manual testing too. The API is in [docs/API.md](docs/API.md).
 
-## Cues
+`server/fish_core.py` is Drama 3's generation code from [fish-ui](https://github.com/ianiv/fish-ui), and
+`server/engine.py` runs it in-process on one thread. `ios/project.yml` is the source of the Xcode project
+(generated, gitignored): change settings there, not in Xcode.
+
+### Cues
 
 `server/text_rules.py` lists what the tagger may use: `SPAN_TAGS` (`<whisper>`, `<excited>`, `<sad>`, `<angry>`,
 `<serious>`, `<sarcastic>`, `<shouting>`, `<emphasis>`, `<laughing>`, `<slow>`, `<fast>`) and `POINT_CUES`
@@ -78,12 +143,12 @@ The smoke test runs the reader with the fake model and a fake tagger against a c
 closing tag. A test on Drama 3 (2 seeds, measured loudness) found `<whisper>…</whisper>` 12–16 dB quieter with an
 immediate return to normal, while a `[whispers]` point cue was only about 5 dB quieter and left the next
 sentence 2–3 dB quieter too. No tag name was ever spoken, and `<slow>`/`<fast>` changed the pace (9.8 s vs 7.2 s).
-The model card only documents point cues, so listen and prune the lists. Spans can't nest or cross paragraphs and
-are at most 400 characters (Drama 3's chunker never cuts inside one). Later: an Apple Foundation Models tagger
-behind the same `Tagger` interface.
+Spans can't nest or cross paragraphs and are at most 400 characters.
 
 ## License
 
-MIT (this code). Drama 3's weights are under the
-[Fish Audio Community License](https://huggingface.co/fishaudio/drama-3/blob/main/LICENSE), which applies to any audio you make with them.
-`server/fish_core.py` comes from fish-ui (MIT, same author).
+This code is under the [MIT License](LICENSE).
+
+Drama 3's weights are not part of this repo (each Mac downloads them) and are under the
+[Fish Audio Community License](https://huggingface.co/fishaudio/drama-3/blob/main/LICENSE), which also covers
+the audio you make with them: read it before use, especially for anything commercial.

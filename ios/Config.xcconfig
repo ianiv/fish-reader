@@ -1,0 +1,9 @@
+// Build settings for the app, the share extension and the tests.
+// Put your own values in Local.xcconfig (gitignored; copy Local.example.xcconfig, or run scripts/setup.py):
+// your Apple developer team, and a bundle ID prefix you own (reverse DNS, e.g. com.yourname).
+
+DEVELOPMENT_TEAM =
+BUNDLE_PREFIX = com.example
+APP_GROUP = group.$(BUNDLE_PREFIX).FishReader
+
+#include? "Local.xcconfig"

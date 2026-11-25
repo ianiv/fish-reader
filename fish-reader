@@ -3,12 +3,20 @@
 # Usage: ./fish-reader [--port 8767] [--data-dir ./data] [--voices-dir DIR] [--config config.json]
 # FISH_READER_TAGGER=fake|none overrides the tagger (default from config: claude, i.e. `claude -p`).
 # FISH_READER_FAKE_MODEL=1 runs a stub model (test tones, no weights).
+#        ./fish-reader setup       step-by-step setup (checks, venv, model, first voice, Tailscale, QR code)
+#        ./fish-reader add-voice   add a narrator voice (record yourself or use a clip)
+#        ./fish-reader pair        show the server URL, token and QR code for the iPhone app
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
+if [ "${1:-}" = "setup" ]; then shift; exec /usr/bin/python3 "$HERE/scripts/setup.py" "$@"; fi
 PY="${FISH_READER_PYTHON:-$HERE/.venv/bin/python}"
 if [ ! -x "$PY" ]; then
-  echo "fish-reader: no venv. Create it: uv venv --python 3.13 .venv && uv pip install --python .venv/bin/python -r requirements.txt" >&2
+  echo "fish-reader: no .venv yet. Run: ./fish-reader setup" >&2
   exit 1
 fi
+case "${1:-}" in
+  add-voice) shift; exec "$PY" "$HERE/scripts/add_voice.py" "$@" ;;
+  pair) shift; exec "$PY" "$HERE/scripts/pair.py" "$@" ;;
+esac
 export HF_HUB_DISABLE_PROGRESS_BARS=1
 exec "$PY" "$HERE/server/server.py" "$@" 2> >(grep --line-buffered -v -E "instantiate a model of type|Warning:|warnings.warn|SOCKS support" >&2)

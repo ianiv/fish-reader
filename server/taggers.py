@@ -9,7 +9,10 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
+import sys
+import threading
 from typing import Protocol
 
 import text_rules as tr
@@ -101,6 +104,50 @@ class NoTagger:
         return text
 
 
+AUTH_PROBLEM = re.compile(r"log ?in|logged|auth|credential|api key|subscription", re.I)
+
+
+class ClaudeOrNone:
+    """The Claude tagger when `claude` is installed and logged in, else no tagging (plain text). Checked once at
+    start in the background (one tiny `claude -p` call), and again whenever a call fails with a login problem."""
+
+    def __init__(self, claude: ClaudeCliTagger, probe: bool = True):
+        self.claude = claude
+        self.problem: str | None = None
+        if not shutil.which(claude.binary):
+            self._off(f"`{claude.binary}` not found")
+        elif probe:
+            threading.Thread(target=self._probe, name="claude-probe", daemon=True).start()
+
+    @property
+    def name(self) -> str:
+        return f"none (claude unavailable: {self.problem})" if self.problem else "claude"
+
+    def _off(self, why: str):
+        if not self.problem:
+            print(f"[tagger] no tagging: {why}. Install Claude Code and log in (run `claude` once), then restart for expressive "
+                  f"markup.", file=sys.stderr, flush=True)
+        self.problem = why
+
+    def _probe(self):
+        try:
+            self.claude.tag("OK.", {})
+        except Exception as e:  # noqa: BLE001
+            msg = str(e)
+            self._off("not logged in" if AUTH_PROBLEM.search(msg) else msg[:120])
+
+    def tag(self, text: str, context: dict) -> str:
+        if self.problem:
+            return text
+        try:
+            return self.claude.tag(text, context)
+        except Exception as e:
+            if AUTH_PROBLEM.search(str(e)):
+                self._off("not logged in")
+                return text
+            raise
+
+
 def make_tagger(cfg: dict) -> Tagger:
     kind = os.environ.get("FISH_READER_TAGGER") or cfg.get("tagger", "claude")
     if kind == "fake":
@@ -108,7 +155,8 @@ def make_tagger(cfg: dict) -> Tagger:
     if kind == "none":
         return NoTagger()
     if kind == "claude":
-        return ClaudeCliTagger(model=cfg.get("claude_model", "sonnet"), binary=cfg.get("claude_binary", "claude"))
+        return ClaudeOrNone(ClaudeCliTagger(model=cfg.get("claude_model", "sonnet"),
+                                            binary=cfg.get("claude_binary", "claude")))
     raise ValueError(f"unknown tagger {kind!r} (claude | fake | none)")
 
 

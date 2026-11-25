@@ -1,0 +1,4 @@
+// Copy to Local.xcconfig and fill in. Xcode > Settings > Accounts shows your team; a free Apple ID works too
+// (apps signed with it expire after 7 days: reinstall from Xcode).
+DEVELOPMENT_TEAM = ABCDE12345
+BUNDLE_PREFIX = com.yourname
