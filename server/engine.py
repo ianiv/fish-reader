@@ -141,6 +141,11 @@ class Engine:
             raise EngineError("the model made no audio")
         return take, item.warnings
 
+    def unload(self):
+        """Free the model's memory now (after anything already queued); it loads again on the next render."""
+        if self.model is not None:
+            self._submit(self._unload)
+
     # --- engine thread ---
 
     def _submit(self, fn) -> Future:

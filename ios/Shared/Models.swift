@@ -20,7 +20,7 @@ struct Article: Codable, Identifiable, Hashable {
     var parts: [Part]?
 
     enum Status: String, Codable {
-        case queued, fetching, extracting, tagging, rendering, done, error, cancelled
+        case queued, fetching, extracting, tagging, rendering, paused, done, error, cancelled
 
         var isActive: Bool { [.queued, .fetching, .extracting, .tagging, .rendering].contains(self) }
 
@@ -31,6 +31,7 @@ struct Article: Codable, Identifiable, Hashable {
             case .extracting: "Finding the article"
             case .tagging: "Adding expression"
             case .rendering: "Reading aloud"
+            case .paused: "Paused"
             case .done: "Ready"
             case .error: "Failed"
             case .cancelled: "Cancelled"

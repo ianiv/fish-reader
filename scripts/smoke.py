@@ -232,10 +232,36 @@ def check_servers():
                 time.sleep(0.3)
             assert shared["status"] == "done" and shared["title"] == "The Keeper Comes Home", shared.get("error")
 
+            # pause: a queued article stops at once; a running one stops its render and frees the model
+            run = api.call("POST", "/api/articles", {"url": "https://paywalled.example/run", "html": FIXTURE})
+            later = api.call("POST", "/api/articles", {"url": "https://paywalled.example/later", "html": FIXTURE})
+            assert api.call("POST", f"/api/articles/{later['id']}/pause")["status"] == "paused"
+            while api.call("GET", f"/api/articles/{run['id']}")["status"] not in ("rendering", "done"):
+                time.sleep(0.05)
+            api.call("POST", f"/api/articles/{run['id']}/pause")
+            while (run := api.call("GET", f"/api/articles/{run['id']}"))["status"] not in ("paused", "done", "error"):
+                time.sleep(0.1)
+            if run["status"] == "paused":  # (unless it finished before the pause landed)
+                assert not any(p["status"] == "rendering" for p in run["parts"]), run["parts"]
+                deadline = time.time() + 10
+                while api.call("GET", "/api/health")["model"]["state"] != "idle-unloaded":
+                    assert time.time() < deadline, "model not unloaded after pause"
+                    time.sleep(0.1)
+                assert api.status("GET", f"/api/articles/{run['id']}/parts/{len(run["parts"]) - 1}/live") == 404
+            assert api.call("GET", f"/api/articles/{later['id']}")["status"] == "paused"
+            for x in (run, later):
+                api.call("POST", f"/api/articles/{x['id']}/resume")
+            for x in (run, later):
+                while (x := api.call("GET", f"/api/articles/{x['id']}"))["status"] not in ("done", "error"):
+                    time.sleep(0.2)
+                assert x["status"] == "done" and all(p["status"] == "done" for p in x["parts"]), x.get("error")
+            paused_run = run["status"] == "paused"
+
             bad = api.call("POST", "/api/articles", {"url": f"http://127.0.0.1:{page_port}/x"})
             assert api.call("DELETE", f"/api/articles/{bad['id']}") == {"removed": bad["id"]}
             assert api.status("GET", f"/api/articles/{bad['id']}") == 404
-            print(f"servers: ok ({len(parts)} parts, {total:.1f} s, {len(audio)} bytes m4a)")
+            print(f"servers: ok ({len(parts)} parts, {total:.1f} s, {len(audio)} bytes m4a, "
+                  f"paused mid-render: {'yes' if paused_run else 'no, it finished first'})")
         except BaseException:
             for p in procs:
                 p.terminate()

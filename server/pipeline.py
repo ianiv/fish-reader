@@ -225,6 +225,7 @@ class Reader:
         self.wake = threading.Condition(self.lock)
         self.articles: dict[str, dict] = {}
         self.cancelled: set[str] = set()
+        self.pausing: set[str] = set()  # cancelled to pause (keep the article), not to delete
         self.tag_pool = ThreadPoolExecutor(1, thread_name_prefix="tagger")
         for f in sorted(self.root.glob("*/article.json")):
             try:
@@ -297,7 +298,7 @@ class Reader:
         with self.lock:
             while True:
                 a = self.articles.get(aid)
-                if not a or a["status"] in ("error", "cancelled") or (a["parts"] and index >= len(a["parts"])):
+                if not a or a["status"] in ("error", "cancelled", "paused") or (a["parts"] and index >= len(a["parts"])):
                     return None
                 if a["parts"]:  # (no parts yet while fetching / extracting: wait)
                     p = a["parts"][index]
@@ -317,6 +318,31 @@ class Reader:
             if not a:
                 return None
             if a["status"] not in ACTIVE:
+                self.cancelled.discard(aid)
+                self.pausing.discard(aid)
+                self.update(a, status="queued", error=None)
+                self.wake.notify_all()
+        return self.get(aid)
+
+    def pause(self, aid: str) -> dict | None:
+        """Stop working on an article for now (frees the GPU): a running render stops within a moment and that
+        part starts over on resume; finished parts are kept."""
+        with self.lock:
+            a = self.articles.get(aid)
+            if not a:
+                return None
+            if a["status"] == "queued":
+                self.update(a, status="paused")
+            elif a["status"] in ACTIVE:
+                self.pausing.add(aid)
+                self.cancelled.add(aid)
+        return self.get(aid)
+
+    def resume(self, aid: str) -> dict | None:
+        with self.lock:
+            a = self.articles.get(aid)
+            if a and a["status"] == "paused":
+                self.pausing.discard(aid)
                 self.cancelled.discard(aid)
                 self.update(a, status="queued", error=None)
                 self.wake.notify_all()
@@ -347,11 +373,27 @@ class Reader:
             try:
                 self.run(a)
             except Cancelled:
-                pass
+                self._paused(a)
             except (StepError, EngineError, core.RequestError) as e:
                 self._fail(a, str(e))
             except Exception as e:  # noqa: BLE001
                 self._fail(a, f"{type(e).__name__}: {e}")
+
+    def _paused(self, a: dict):
+        """After a Cancelled: if it was a pause, keep the article as paused (its unfinished part re-renders on
+        resume) and unload the model when nothing else is waiting."""
+        with self.lock:
+            if a["id"] not in self.pausing or a["id"] not in self.articles:
+                return
+            self.pausing.discard(a["id"])
+            self.cancelled.discard(a["id"])
+            for p in a.get("parts") or []:
+                if p["status"] == "rendering":
+                    p["status"] = "tagged" if p.get("tagged") is not None else "pending"
+            self.update(a, status="paused")
+            idle = self._next() is None
+        if idle:
+            self.engine.unload()
 
     def _fail(self, a: dict, msg: str):
         with self.lock:

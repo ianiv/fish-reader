@@ -65,6 +65,19 @@ final class ArticleStore {
         }
     }
 
+    /// Pause (stops the server's work on it and frees its GPU) or resume an article.
+    func setPaused(_ id: String, _ paused: Bool) async {
+        guard let client else { return }
+        do {
+            let a = try await (paused ? client.pause(id) : client.resume(id))
+            details[id] = a
+            if let i = articles.firstIndex(where: { $0.id == id }) { articles[i].status = a.status }
+            startPollingIfNeeded()
+        } catch {
+            self.error = error.localizedDescription
+        }
+    }
+
     func retry(_ id: String) async {
         guard let client else { return }
         do {

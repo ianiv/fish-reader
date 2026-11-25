@@ -24,6 +24,7 @@ struct LibraryView: View {
     @State private var adding = false
     @State private var settings = !ReaderSettings.isConfigured
     @State private var path: [String] = []
+    @State private var pairing: Pairing?
 
     var body: some View {
         NavigationStack(path: $path) {
@@ -35,6 +36,13 @@ struct LibraryView: View {
                     NavigationLink(value: a.id) { ArticleRow(article: a) }
                         .swipeActions {
                             Button("Delete", role: .destructive) { Task { await store.delete(a.id) } }
+                        }
+                        .swipeActions(edge: .leading) {
+                            if a.status.isActive {
+                                Button("Pause", systemImage: "pause") { Task { await store.setPaused(a.id, true) } }.tint(.orange)
+                            } else if a.status == .paused {
+                                Button("Resume", systemImage: "play") { Task { await store.setPaused(a.id, false) } }.tint(.green)
+                            }
                         }
                 }
             }
@@ -66,6 +74,41 @@ struct LibraryView: View {
             .sheet(isPresented: $settings, onDismiss: { Task { await store.refresh() } }) { SettingsView() }
             .task { await store.refresh() }
         }
+        .onOpenURL { url in
+            guard let p = Pairing(url) else { return }
+            settings = false  // (an open Settings sheet would hide the alert, and save its old values over these)
+            Task {
+                try? await Task.sleep(for: .milliseconds(600))
+                pairing = p
+            }
+        }
+        .alert("Connect to this server?", isPresented: Binding(get: { pairing != nil }, set: { if !$0 { pairing = nil } }),
+               presenting: pairing) { p in
+            Button("Connect") {
+                ReaderSettings.serverURL = p.server
+                ReaderSettings.token = p.token
+                settings = false
+                Task { await store.refresh() }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: { p in
+            Text(p.server)
+        }
+    }
+}
+
+/// A fishreader://pair?server=…&token=… link (the QR code printed by scripts/pair.py on the Mac).
+struct Pairing {
+    let server: String
+    let token: String
+
+    init?(_ url: URL) {
+        guard url.scheme == "fishreader", url.host == "pair",
+              let q = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems,
+              let server = q.first(where: { $0.name == "server" })?.value, server.hasPrefix("http"),
+              let token = q.first(where: { $0.name == "token" })?.value, !token.isEmpty else { return nil }
+        self.server = server
+        self.token = token
     }
 }
 
@@ -211,7 +254,10 @@ struct ArticleView: View {
                         Text(a.displayTitle).font(.title2.bold())
                         Text([a.byline, a.site].compactMap { $0?.isEmpty == false ? $0 : nil }.joined(separator: " · "))
                             .font(.subheadline).foregroundStyle(.secondary)
-                        if a.status != .done { StatusLine(article: a) { Task { await store.retry(a.id) } } }
+                        if a.status != .done {
+                            StatusLine(article: a, retry: { Task { await store.retry(a.id) } },
+                                       resume: { Task { await store.setPaused(a.id, false) } })
+                        }
                         if let w = a.warnings, !w.isEmpty {
                             DisclosureGroup("\(w.count) warning\(w.count == 1 ? "" : "s")") {
                                 ForEach(w, id: \.self) { Text($0).font(.caption) }
@@ -250,6 +296,11 @@ struct ArticleView: View {
             ToolbarItem(placement: .topBarTrailing) {
                 Menu {
                     if let u = URL(string: a.url) { Link("Open original", destination: u) }
+                    if a.status.isActive {
+                        Button("Pause reading", systemImage: "pause.circle") { Task { await store.setPaused(a.id, true) } }
+                    } else if a.status == .paused {
+                        Button("Resume reading", systemImage: "play.circle") { Task { await store.setPaused(a.id, false) } }
+                    }
                     Button("Retry", systemImage: "arrow.clockwise") { Task { await store.retry(a.id) } }
                         .disabled(a.status.isActive)
                 } label: { Image(systemName: "ellipsis.circle") }
@@ -261,12 +312,19 @@ struct ArticleView: View {
 struct StatusLine: View {
     let article: Article
     var retry: () -> Void
+    var resume: () -> Void = {}
 
     var body: some View {
         if article.status == .error {
             VStack(alignment: .leading, spacing: 6) {
                 Label(article.error ?? "Failed", systemImage: "exclamationmark.triangle").foregroundStyle(.red)
                 Button("Try again", action: retry).buttonStyle(.bordered)
+            }
+            .font(.footnote)
+        } else if article.status == .paused {
+            HStack {
+                Label("Paused", systemImage: "pause.circle").foregroundStyle(.secondary)
+                Button("Resume", action: resume).buttonStyle(.bordered)
             }
             .font(.footnote)
         } else if article.status.isActive {
@@ -404,7 +462,7 @@ struct SettingsView: View {
                     Button("Test connection") { Task { await test() } }
                     if let status { Text(status).font(.footnote).foregroundStyle(ok ? .green : .red) }
                 } header: { Text("Server") } footer: {
-                    Text("The fish-reader server on your Mac, through `tailscale serve`. The token is in its config.json.")
+                    Text("The fish-reader server on your Mac, through `tailscale serve`. Easiest: on the Mac run `./fish-reader pair` and scan the QR code with the Camera app. The token is also in the server's config.json.")
                 }
                 Section("Narrator") {
                     Picker("Voice", selection: $voice) {

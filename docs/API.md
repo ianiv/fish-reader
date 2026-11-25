@@ -12,6 +12,8 @@ Server: `server/server.py`, default `127.0.0.1:8767`. Every `/api` request needs
 | `GET /api/articles/<id>` | | article |
 | `DELETE /api/articles/<id>` | | `{removed}`; stops its render after the current piece |
 | `POST /api/articles/<id>/retry` | | article; re-queues a failed/cancelled one, skipping finished steps |
+| `POST /api/articles/<id>/pause` | | article; stops work on it (`paused`, kept across restarts). A running render stops and that part starts over on resume; the model unloads when nothing else is queued |
+| `POST /api/articles/<id>/resume` | | article; re-queues a paused one |
 | `GET /api/articles/<id>/parts/<n>.m4a` | | AAC audio of part n (Range supported); 404 until ready |
 | `GET /api/articles/<id>/audio.m4a` | | the whole article, once `done` |
 | `GET /api/articles/<id>/parts/<n>/live` | | part n as it renders: `application/octet-stream`, raw s16le mono PCM (`X-Sample-Rate: 44100`, `X-Sample-Format: s16le`) from the part's start, closing when the part ends. Waits up to 2 min for the part to start; 409 once it's done (play the m4a) |
@@ -20,7 +22,7 @@ Article:
 
 ```
 {id, url, final_url?, source: fetched|shared, title, byline, site, date, voice, tagger,
- status: queued|fetching|extracting|tagging|rendering|done|error|cancelled, step, error, warnings: [str],
+ status: queued|fetching|extracting|tagging|rendering|paused|done|error|cancelled, step, error, warnings: [str],
  progress: {parts_done, parts_total}, duration_s, audio_url, created, updated, fish_job,
  parts: [{index, text, tagged (null until tagged), status: pending|tagged|rendering|done,
           continued (rendered as a continuation of part n-1), gain (normalization factor | null), duration_s, start_s (offset in the whole article), audio_url, warnings}]}

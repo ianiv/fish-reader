@@ -163,7 +163,7 @@ class Handler(BaseHTTPRequestHandler):
         m = self.command, path
         try:
             if m == ("GET", "/api/health"):
-                return self.send_json({"ok": True, "model": self.engine.status(), "tagger": self.tagger_name})
+                return self.send_json({"ok": True, "model": self.engine.status(), "tagger": self.reader.tagger.name})
             if m == ("GET", "/api/voices"):
                 return self.send_json({"voices": [{k: v[k] for k in ("id", "name", "description")}
                                                   for v in self.engine.voices() if v["has_transcript"]]})
@@ -192,6 +192,10 @@ class Handler(BaseHTTPRequestHandler):
                     return self.send_json({"removed": aid})
                 if rest == "/retry" and self.command == "POST":
                     return self.send_json(self.reader.retry(aid))
+                if rest == "/pause" and self.command == "POST":
+                    return self.send_json(self.reader.pause(aid))
+                if rest == "/resume" and self.command == "POST":
+                    return self.send_json(self.reader.resume(aid))
                 lm = re.fullmatch(r"/parts/(\d+)/live", rest)
                 if lm and self.command == "GET":
                     return self.send_live(aid, int(lm.group(1)))

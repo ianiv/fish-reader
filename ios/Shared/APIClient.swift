@@ -70,6 +70,9 @@ struct APIClient {
 
     func retry(_ id: String) async throws -> Article { try await send(request("POST", "/api/articles/\(id)/retry"), as: Article.self) }
 
+    func pause(_ id: String) async throws -> Article { try await send(request("POST", "/api/articles/\(id)/pause"), as: Article.self) }
+    func resume(_ id: String) async throws -> Article { try await send(request("POST", "/api/articles/\(id)/resume"), as: Article.self) }
+
     func voices() async throws -> [Voice] {
         struct List: Decodable { let voices: [Voice] }
         return try await send(request("GET", "/api/voices"), as: List.self).voices
