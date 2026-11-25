@@ -3,10 +3,11 @@ import MediaPlayer
 import Observation
 
 /// Plays an article as one timeline of parts (article time = sum of the earlier parts' durations + time in the
-/// part). Finished parts play from their downloaded m4a files with an AVQueuePlayer ("file" mode). The first part
-/// that isn't finished yet plays live while Drama 3 renders it ("live" mode): its PCM streams from
-/// /parts/<n>/live into an AVAudioEngine, so sound starts about a second after rendering does. When a live part
-/// ends, playback goes on with the next part, from its file if it's ready, else live again.
+/// part). Every part goes through one AVAudioEngine: finished parts are downloaded (m4a) and decoded to samples;
+/// the first part that isn't finished yet streams live while Drama 3 renders it (/parts/<n>/live), so sound
+/// starts about a second after rendering does. Speed changes go through SpeechStretcher (pitch-period
+/// cutting, kinder to voices than AVFoundation's stretchers). When a part runs out, the next one follows
+/// without a gap if it's ready, else playback waits for it.
 /// Position is remembered per article.
 @MainActor @Observable
 final class PlayerController {
@@ -17,35 +18,50 @@ final class PlayerController {
     private(set) var time: Double = 0
     private(set) var isPlaying = false
     private(set) var isWaiting = false  // playing, but the audio isn't there yet (part starting / buffering)
-    private(set) var isLive = false
+    var isLive: Bool { source?.live != nil }
     var rate: Float = 1.0 {
         didSet {
-            player.defaultRate = rate
-            if isPlaying && !isLive { player.rate = rate }
-            pitch.rate = rate
+            guard rate != oldValue else { return }
+            if source != nil {  // restart from here with the new speed (scheduled audio is ~1.5 s ahead)
+                updateClock()
+                seek(to: time, play: isPlaying)
+            }
             updateNowPlaying()
         }
     }
 
-    // file mode
-    private let player = AVQueuePlayer()
-    private var queued: [Int] = []  // part index of each AVPlayerItem in the queue, in order
-    private var downloading: Set<Int> = []
+    /// The part being fed to the engine: decoded file samples, or a live stream that is still growing.
+    private struct Source {
+        let index: Int
+        let sampleRate: Double
+        var samples: [Float] = []
+        var live: LiveStream?
+    }
 
-    // live mode
+    /// Scheduled output and the input it came from, for the clock.
+    private struct Segment {
+        let part: Int, outStart: Int, outEnd: Int, inStart: Int, inEnd: Int
+        let sampleRate: Double
+    }
+
     private let engine = AVAudioEngine()
     private let node = AVAudioPlayerNode()
-    private let pitch = AVAudioUnitTimePitch()
-    private var live: LiveStream?
-    private var liveCursor = 0      // next sample to schedule
-    private var liveBase = 0        // sample the node started playing from (after the last stop)
-    private var livePending = 0     // scheduled buffers not yet played
-    private var liveGeneration = 0  // bumps on every stop, so stale buffer completions are ignored
-    private var liveFormat: AVAudioFormat?
+    private var format: AVAudioFormat?
+    private var source: Source?
+    private var cursor = 0          // next input sample of `source` to stretch
+    private var flushed = false     // the stretcher's tail of `source` is scheduled
+    private var stretcher = SpeechStretcher(sampleRate: 44100, speed: 1)
+    private var segments: [Segment] = []
+    private var scheduledOut = 0    // output frames scheduled since the node last started
+    private var pending = 0         // scheduled buffers not yet played
+    private var generation = 0      // bumps on every node stop, so stale buffer completions are ignored
+    private var seekToken = 0       // bumps on every seek, so a slow decode doesn't start a stale part
+    private var decoded: [Int: (samples: [Float], sampleRate: Double)] = [:]  // current and next parts
+    private var loading: Set<Int> = []
+    private var downloading = false
     private var streamed: [Int: Double] = [:]  // durations of parts heard live, until the server reports them
 
     private var timer: Timer?
-    private var endObserver: NSObjectProtocol?
 
     // MARK: timeline
 
@@ -83,13 +99,21 @@ final class PlayerController {
 
     private init() {
         try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .spokenAudio)
-        player.actionAtItemEnd = .advance
         engine.attach(node)
-        engine.attach(pitch)
-        endObserver = NotificationCenter.default.addObserver(forName: AVPlayerItem.didPlayToEndTimeNotification, object: nil, queue: .main) { [weak self] n in
-            MainActor.assumeIsolated {
-                guard let self, let item = n.object as? AVPlayerItem, self.player.items().first === item || self.player.currentItem === item else { return }
-                self.fileItemEnded()
+        let nc = NotificationCenter.default
+        nc.addObserver(forName: AVAudioSession.routeChangeNotification, object: nil, queue: .main) { [weak self] n in
+            let reason = (n.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt).flatMap(AVAudioSession.RouteChangeReason.init)
+            MainActor.assumeIsolated { if reason == .oldDeviceUnavailable { self?.pause() } }  // headphones out
+        }
+        nc.addObserver(forName: AVAudioSession.interruptionNotification, object: nil, queue: .main) { [weak self] n in
+            let type = (n.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt).flatMap(AVAudioSession.InterruptionType.init)
+            MainActor.assumeIsolated { if type == .began { self?.pause() } }  // a call, Siri, an alarm
+        }
+        nc.addObserver(forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated {  // the engine stopped (output changed): carry on from here
+                guard let self, self.source != nil else { return }
+                self.updateClock()
+                self.seek(to: self.time, play: self.isPlaying)
             }
         }
         timer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
@@ -107,14 +131,30 @@ final class PlayerController {
             stopAll()
             isPlaying = false
             streamed = [:]
+            decoded = [:]
             article = a
             time = UserDefaults.standard.double(forKey: "pos.\(a.id)")
             currentPart = part(at: time)
         } else {
             article = a
-            if !isLive { Task { await fillQueue() } }
-            if isWaiting && isPlaying && !isLive { seek(to: time, play: true) }  // e.g. the next part just got ready
+            prepare(currentPart + 1)
+            if isPlaying && pending == 0 && exhausted { feed() }  // e.g. the next part just got ready
         }
+        downloadReady()
+        updateNowPlaying()
+    }
+
+    /// The article was deleted: stop it, forget its position and leave the player empty (hides the player bar).
+    func close(_ id: String) {
+        guard article?.id == id else { return }
+        stopAll()
+        isPlaying = false
+        article = nil
+        decoded = [:]
+        streamed = [:]
+        time = 0
+        currentPart = 0
+        UserDefaults.standard.removeObject(forKey: "pos.\(id)")
         updateNowPlaying()
     }
 
@@ -123,28 +163,26 @@ final class PlayerController {
     func play() {
         guard article != nil else { return }
         try? AVAudioSession.sharedInstance().setActive(true)
-        if isLive {
-            isPlaying = true
-            startEngine()
-            node.play()
-        } else if player.items().isEmpty {
+        guard source != nil else {
             seek(to: time, play: true)
             return
-        } else {
-            isPlaying = true
-            player.playImmediately(atRate: rate)
         }
+        isPlaying = true
+        feed()
         updateNowPlaying()
     }
 
     func pause() {
+        updateClock()
         isPlaying = false
-        if isLive { node.pause() } else { player.pause() }
+        isWaiting = false
+        node.pause()
         if let id = article?.id { savePosition(id) }
         updateNowPlaying()
     }
 
     func skip(_ seconds: Double) {
+        updateClock()
         let limit = livePartIndex.flatMap { i in start(of: i).map { $0 + liveAvailable(i) } } ?? readyDuration
         seek(to: max(0, min(time + seconds, max(0, limit - 0.5))), play: isPlaying)
     }
@@ -154,34 +192,31 @@ final class PlayerController {
         seek(to: s, play: true)
     }
 
-    /// Go to article time `t`: a finished part plays from its file, the live part from the stream.
+    /// Go to article time `t`: a finished part plays from its (decoded) file, the live part from the stream.
     func seek(to t: Double, play: Bool) {
         guard let a = article else { return }
         let index = part(at: t)
+        let offset = max(0, t - (start(of: index) ?? t))
+        resetNode()
+        seekToken += 1
         currentPart = index
         time = t
         isPlaying = play
-        let offset = max(0, t - (start(of: index) ?? t))
         if index < a.readyParts.count {
-            stopLive()
-            player.pause()
-            player.removeAllItems()
-            queued = []
-            isWaiting = play
-            Task {
-                await fillQueue()
-                if let first = player.items().first, queued.first == index {
-                    await first.seek(to: CMTime(seconds: offset, preferredTimescale: 600))
+            source?.live?.cancel()
+            source = nil
+            if let d = decoded[index] {
+                begin(Source(index: index, sampleRate: d.sampleRate, samples: d.samples), at: offset)
+            } else {
+                isWaiting = play
+                let token = seekToken
+                load(index) { [weak self] in
+                    guard let self, self.seekToken == token, let d = self.decoded[index] else { return }
+                    self.begin(Source(index: index, sampleRate: d.sampleRate, samples: d.samples), at: offset)
                 }
-                isWaiting = false
-                if self.isPlaying { player.playImmediately(atRate: rate) }
-                updateNowPlaying()
             }
         } else if index == livePartIndex {
-            player.pause()
-            player.removeAllItems()
-            queued = []
-            playLive(index, from: offset)
+            begin(liveSource(index), at: offset)
         } else {
             stopAll()
             isPlaying = false
@@ -202,51 +237,206 @@ final class PlayerController {
     }
 
     private func stopAll() {
-        stopLive()
-        player.pause()
-        player.removeAllItems()
-        queued = []
+        resetNode()
+        source?.live?.cancel()
+        source = nil
         isWaiting = false
     }
 
-    // MARK: file mode
+    // MARK: sources
 
-    /// Append every ready part after the last queued one (downloading as needed).
-    private func fillQueue() async {
-        guard let a = article, let client = APIClient(), !isLive else { return }
-        for p in a.readyParts where p.index >= (queued.last.map { $0 + 1 } ?? currentPart) {
-            let file = AudioCache.file(a.id, part: p.index)
-            if !FileManager.default.fileExists(atPath: file.path) {
-                guard !downloading.contains(p.index), let url = p.audioUrl else { return }
-                downloading.insert(p.index)
-                defer { downloading.remove(p.index) }
-                do { try await client.download(url, to: file) } catch { return }
-            }
-            guard article?.id == a.id, !isLive, !queued.contains(p.index),
-                  (queued.last.map { $0 + 1 } ?? currentPart) == p.index else { return }
-            player.insert(AVPlayerItem(url: file), after: nil)
-            queued.append(p.index)
+    private func liveSource(_ index: Int) -> Source {
+        if let live = source?.live, live.index == index, live.articleID == article?.id, !live.failed {
+            return Source(index: index, sampleRate: live.sampleRate, live: live)
         }
+        source?.live?.cancel()
+        let stream = LiveStream(articleID: article?.id ?? "", index: index)
+        stream.onData = { [weak self] in self?.feed() }
+        stream.onEnd = { [weak self] status in self?.liveEnded(status) }
+        if let client = APIClient() { stream.start(client) }
+        return Source(index: index, sampleRate: stream.sampleRate, live: stream)
     }
 
-    private func fileItemEnded() {
-        guard !queued.isEmpty, !isLive else { return }
-        queued.removeFirst()
-        if let n = queued.first {
-            currentPart = n
+    private func begin(_ s: Source, at offset: Double) {
+        source = s
+        cursor = Int(offset * s.sampleRate)
+        if s.live == nil { cursor = min(cursor, s.samples.count) }
+        flushed = false
+        stretcher = SpeechStretcher(sampleRate: s.sampleRate, speed: rate, start: cursor)
+        isWaiting = isPlaying
+        configure(s.sampleRate)
+        feed()
+        prepare(s.index + 1)
+    }
+
+    private func available(_ s: Source) -> Int { s.live?.samples.count ?? s.samples.count }
+    private func isComplete(_ s: Source) -> Bool { s.live?.finished ?? true }
+
+    /// Everything of the current part is scheduled.
+    private var exhausted: Bool {
+        guard let s = source else { return true }
+        return isComplete(s) && cursor >= available(s) && flushed
+    }
+
+    private func liveAvailable(_ index: Int) -> Double {
+        guard let live = source?.live, live.index == index else { return 0 }
+        return Double(live.samples.count) / live.sampleRate
+    }
+
+    /// The next part follows on directly (no gap) when its audio is decoded; false if it isn't there yet.
+    private func advance() -> Bool {
+        guard let s = source, let a = article, let parts = a.parts else { return false }
+        if let live = s.live { streamed[s.index] = Double(live.samples.count) / live.sampleRate }
+        let next = s.index + 1
+        guard next < parts.count else { return false }
+        if next < a.readyParts.count, let d = decoded[next], d.sampleRate == format?.sampleRate {
+            s.live?.cancel()
+            source = Source(index: next, sampleRate: d.sampleRate, samples: d.samples)
+        } else if next == livePartIndex {
+            source = liveSource(next)
         } else {
-            partFinished(currentPart)
+            return false
         }
-        updateNowPlaying()
+        cursor = 0
+        flushed = false
+        stretcher = SpeechStretcher(sampleRate: source!.sampleRate, speed: rate)
+        decoded = decoded.filter { $0.key >= next }
+        prepare(next + 1)
+        return true
     }
 
-    /// A part played to its end: go on with the next one (file or live), or stop at the end of the article.
+    /// Download (if needed) and decode part `index` off the main thread; keeps only the current and next parts.
+    private func load(_ index: Int, then done: @escaping () -> Void = {}) {
+        guard let a = article, index < a.readyParts.count else { return }
+        if decoded[index] != nil { done(); return }
+        guard !loading.contains(index), let client = APIClient() else { return }
+        let part = a.readyParts[index]
+        loading.insert(index)
+        Task {
+            defer { loading.remove(index) }
+            let file = AudioCache.file(a.id, part: index)
+            if !FileManager.default.fileExists(atPath: file.path) {
+                guard let url = part.audioUrl, (try? await client.download(url, to: file)) != nil else { return }
+            }
+            guard let d = await Task.detached(operation: { try? Self.decode(file) }).value,
+                  article?.id == a.id else { return }
+            decoded[index] = d
+            decoded = decoded.filter { $0.key >= currentPart }
+            done()
+            if isPlaying && pending == 0 && exhausted { feed() }
+        }
+    }
+
+    private func prepare(_ index: Int) { load(index) }
+
+    /// Keep every finished part on disk, so the article plays offline.
+    private func downloadReady() {
+        guard !downloading, let a = article, let client = APIClient() else { return }
+        downloading = true
+        Task {
+            defer { downloading = false }
+            for p in a.readyParts {
+                let file = AudioCache.file(a.id, part: p.index)
+                guard !FileManager.default.fileExists(atPath: file.path), let url = p.audioUrl else { continue }
+                guard article?.id == a.id, (try? await client.download(url, to: file)) != nil else { return }
+            }
+        }
+    }
+
+    nonisolated private static func decode(_ url: URL) throws -> (samples: [Float], sampleRate: Double) {
+        let f = try AVAudioFile(forReading: url)
+        guard let buf = AVAudioPCMBuffer(pcmFormat: f.processingFormat, frameCapacity: AVAudioFrameCount(f.length)) else {
+            throw CocoaError(.fileReadCorruptFile)
+        }
+        try f.read(into: buf)
+        let samples = Array(UnsafeBufferPointer(start: buf.floatChannelData![0], count: Int(buf.frameLength)))
+        return (samples, f.processingFormat.sampleRate)
+    }
+
+    // MARK: engine
+
+    private func configure(_ sampleRate: Double) {
+        let fmt = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 1)!
+        if format != fmt {
+            engine.stop()
+            engine.disconnectNodeOutput(node)
+            engine.connect(node, to: engine.mainMixerNode, format: fmt)
+            format = fmt
+        }
+    }
+
+    private func resetNode() {
+        generation += 1
+        node.stop()
+        pending = 0
+        scheduledOut = 0
+        segments = []
+    }
+
+    /// Keep about 1.5 s scheduled ahead: stretch the next input and schedule it; at the end of a part go on
+    /// with the next one, or finish the part once everything has played.
+    private func feed() {
+        guard var s = source, let fmt = format else { return }
+        if pending == 0 && scheduledOut > 0 { resetNode() }  // ran dry (live part behind): restart the clock
+        let chunk = Int(s.sampleRate / 4)  // 0.25 s of input per buffer
+        while pending < 6 {
+            let avail = available(s)
+            let inStart = stretcher.consumed
+            var out: [Float]
+            if cursor < avail {
+                let n = min(chunk, avail - cursor)
+                if n < chunk && !isComplete(s) && pending > 0 { break }  // wait for a full buffer while ahead
+                let input: [Float] = s.live.map { Array($0.samples[cursor..<cursor + n]) }
+                    ?? Array(s.samples[cursor..<cursor + n])
+                cursor += n
+                out = stretcher.process(input)
+            } else if isComplete(s) && !flushed {
+                out = stretcher.flush()
+                flushed = true
+            } else if isComplete(s) && advance() {
+                s = source!
+                continue
+            } else {
+                break
+            }
+            guard !out.isEmpty, let buf = AVAudioPCMBuffer(pcmFormat: fmt, frameCapacity: AVAudioFrameCount(out.count)) else { continue }
+            buf.frameLength = AVAudioFrameCount(out.count)
+            out.withUnsafeBufferPointer { buf.floatChannelData![0].update(from: $0.baseAddress!, count: out.count) }
+            segments.append(Segment(part: s.index, outStart: scheduledOut, outEnd: scheduledOut + out.count,
+                                    inStart: inStart, inEnd: stretcher.consumed, sampleRate: s.sampleRate))
+            scheduledOut += out.count
+            pending += 1
+            let gen = generation
+            node.scheduleBuffer(buf, completionCallbackType: .dataPlayedBack) { [weak self] _ in
+                Task { @MainActor in
+                    guard let self, self.generation == gen else { return }
+                    self.pending -= 1
+                    self.feed()
+                }
+            }
+        }
+        if pending > 0 {
+            if isPlaying {
+                if !engine.isRunning { try? engine.start() }
+                if !node.isPlaying { node.play() }
+            }
+            isWaiting = false
+        } else if exhausted {
+            partFinished(source?.index ?? currentPart)
+        } else {
+            isWaiting = isPlaying
+        }
+    }
+
+    /// A part played to its end and the next one couldn't follow on directly: seek to it (that loads or streams
+    /// it), wait for it, or stop at the end of the article.
     private func partFinished(_ index: Int) {
-        guard let a = article, let parts = a.parts else { return }
+        guard let a = article, isPlaying else { return }
+        let parts = a.parts ?? []
         let next = index + 1
         if next < parts.count || (a.status.isActive && parts.isEmpty) {
-            if let s = start(of: next) {
-                seek(to: s, play: isPlaying)
+            if canPlay(part: next), let s = start(of: next) {
+                seek(to: s, play: true)
             } else {
                 isWaiting = true
             }
@@ -255,141 +445,51 @@ final class PlayerController {
             isPlaying = false
             time = 0
             UserDefaults.standard.removeObject(forKey: "pos.\(a.id)")
+            updateNowPlaying()
         }
-    }
-
-    // MARK: live mode
-
-    private func liveAvailable(_ index: Int) -> Double {
-        guard let live, live.index == index else { return 0 }
-        return Double(live.samples.count) / live.sampleRate
-    }
-
-    private func playLive(_ index: Int, from offset: Double) {
-        guard let a = article, let client = APIClient() else { return }
-        if live?.index != index || live?.articleID != a.id || live?.failed == true {
-            stopLive()
-            let stream = LiveStream(articleID: a.id, index: index)
-            stream.onData = { [weak self] in self?.liveData() }
-            stream.onEnd = { [weak self] status in self?.liveEnded(status) }
-            live = stream
-            stream.start(client)
-        } else {
-            resetNode()
-        }
-        isLive = true
-        liveCursor = Int(offset * (live?.sampleRate ?? 44100))
-        liveBase = liveCursor
-        isWaiting = true
-        liveData()
-    }
-
-    private func stopLive() {
-        live?.cancel()
-        live = nil
-        resetNode()
-        isLive = false
-    }
-
-    private func resetNode() {
-        liveGeneration += 1
-        node.stop()
-        livePending = 0
-    }
-
-    private func startEngine() {
-        guard let live else { return }
-        let fmt = AVAudioFormat(standardFormatWithSampleRate: live.sampleRate, channels: 1)!
-        if liveFormat != fmt {
-            engine.stop()
-            engine.disconnectNodeOutput(node)
-            engine.disconnectNodeOutput(pitch)
-            engine.connect(node, to: pitch, format: fmt)
-            engine.connect(pitch, to: engine.mainMixerNode, format: fmt)
-            liveFormat = fmt
-        }
-        pitch.rate = rate
-        if !engine.isRunning { try? engine.start() }
-    }
-
-    /// New samples arrived (or playback moved): keep about 2 s scheduled ahead.
-    private func liveData() {
-        guard isLive, let live else { return }
-        startEngine()
-        guard let fmt = liveFormat else { return }
-        let chunk = Int(live.sampleRate / 4)  // 0.25 s buffers
-        let generation = liveGeneration
-        while livePending < 8, liveCursor < live.samples.count {
-            let n = min(chunk, live.samples.count - liveCursor)
-            if n < chunk && !live.finished && livePending > 0 { break }  // wait for a full buffer while ahead
-            guard let buf = AVAudioPCMBuffer(pcmFormat: fmt, frameCapacity: AVAudioFrameCount(n)) else { break }
-            buf.frameLength = AVAudioFrameCount(n)
-            live.samples.withUnsafeBufferPointer { src in
-                buf.floatChannelData![0].update(from: src.baseAddress! + liveCursor, count: n)
-            }
-            liveCursor += n
-            livePending += 1
-            node.scheduleBuffer(buf, completionCallbackType: .dataPlayedBack) { [weak self] _ in
-                Task { @MainActor in
-                    guard let self, self.liveGeneration == generation else { return }
-                    self.livePending -= 1
-                    self.liveData()
-                    self.checkLiveEnd()
-                }
-            }
-        }
-        if livePending > 0 && isWaiting {
-            isWaiting = false
-        }
-        if isPlaying && livePending > 0 && !node.isPlaying { node.play() }
-        if livePending == 0 && isPlaying { isWaiting = true }
     }
 
     private func liveEnded(_ status: LiveStream.End) {
         switch status {
         case .finished:
-            liveData()
-            checkLiveEnd()
+            feed()
         case .partReady, .failed:
             // finished meanwhile (play its file), or the stream broke: reload and play from here
             guard let a = article, let client = APIClient() else { return }
+            updateClock()
             let t = time, play = isPlaying
             Task {
                 try? await Task.sleep(for: .seconds(status == .failed ? 2 : 0.3))
                 if let fresh = try? await client.article(a.id), self.article?.id == a.id {
                     self.article = fresh
-                    self.live?.failed = true
+                    self.source?.live?.failed = true
                     self.seek(to: t, play: play)
                 }
             }
         }
     }
 
-    private func checkLiveEnd() {
-        guard isLive, let live, live.finished, liveCursor >= live.samples.count, livePending == 0 else { return }
-        let index = live.index
-        streamed[index] = Double(live.samples.count) / live.sampleRate  // until the server's number arrives
-        stopLive()
-        partFinished(index)
-    }
-
     // MARK: clock
+
+    /// Article time from what the node has played: the segment playing now, interpolated in its input.
+    private func updateClock() {
+        guard source != nil, !segments.isEmpty, let last = node.lastRenderTime,
+              let pt = node.playerTime(forNodeTime: last) else { return }
+        let played = Int(pt.sampleTime)
+        guard let k = segments.lastIndex(where: { $0.outStart <= played }) else { return }
+        let g = segments[k]
+        let f = min(1, Double(played - g.outStart) / Double(max(1, g.outEnd - g.outStart)))
+        let input = Double(g.inStart) + f * Double(g.inEnd - g.inStart)
+        if let start = start(of: g.part) {
+            currentPart = g.part
+            time = start + input / g.sampleRate
+        }
+        if k > 8 { segments.removeFirst(k - 8) }
+    }
 
     private func tick() {
         guard let a = article else { return }
-        if isLive, let live, let start = start(of: live.index) {
-            var played = liveBase
-            if let last = node.lastRenderTime, let pt = node.playerTime(forNodeTime: last) {
-                played += Int(pt.sampleTime)
-            }
-            time = start + Double(min(played, live.samples.count)) / live.sampleRate
-        } else if !isLive, let first = queued.first, player.currentItem != nil, let start = start(of: first) {
-            let s = player.currentTime().seconds
-            if s.isFinite {
-                currentPart = first
-                time = start + s
-            }
-        }
+        if isPlaying && !isWaiting { updateClock() }
         if isPlaying, Int(time * 4) % 40 == 0 { savePosition(a.id) }
         if isPlaying { updateNowPlaying() }
     }

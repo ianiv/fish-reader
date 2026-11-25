@@ -56,6 +56,7 @@ final class ArticleStore {
         guard let client else { return }
         do {
             try await client.delete(id)
+            PlayerController.shared.close(id)
             articles.removeAll { $0.id == id }
             details[id] = nil
             AudioCache.remove(id)
