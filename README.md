@@ -33,7 +33,7 @@ from your phone and nobody else.
 ## Set up the Mac
 
 ```sh
-git clone <this repo> fish-reader && cd fish-reader
+git clone https://github.com/ianiv/fish-reader.git && cd fish-reader
 ./fish-reader setup
 ```
 
