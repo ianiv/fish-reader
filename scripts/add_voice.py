@@ -29,11 +29,16 @@ WHISPER_PROCESSOR = "openai/whisper-large-v3-turbo"
 def duration(path: Path) -> float:
     out = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(path)],
                          capture_output=True, text=True).stdout.strip()
-    return float(out or 0)
+    try:
+        return float(out)
+    except ValueError:  # "N/A" or empty: no usable audio
+        return 0.0
 
 
 def to_reference(src: Path, dest: Path, max_s: float | None = None) -> float:
     """Mono 44.1 kHz 16-bit WAV, leading/trailing silence trimmed, optionally cut to max_s."""
+    if duration(src) <= 0:
+        sys.exit(f"no audio in {src.name}: check the file (or, for a recording, the microphone)")
     cmd = ["ffmpeg", "-y", "-loglevel", "error", "-i", str(src), "-ac", "1", "-ar", "44100",
            "-af", "silenceremove=start_periods=1:start_threshold=-45dB,areverse,"
                   "silenceremove=start_periods=1:start_threshold=-45dB,areverse"]

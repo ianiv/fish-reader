@@ -22,6 +22,8 @@ from common import (BOLD, DIM, RESET, ROOT, VENV_PY, ask, bad, load_config, ok, 
 MODEL = "mlx-community/fish-audio-drama-3-4bit"
 MIN_RAM_GB = 32
 LOCAL_XCCONFIG = ROOT / "ios" / "Local.xcconfig"
+TEAM_ID = re.compile(r"^[A-Z0-9]{10}$")
+BUNDLE_PREFIX = re.compile(r"^[A-Za-z][A-Za-z0-9-]*(\.[A-Za-z0-9-]+)+$")
 
 
 def run(cmd: list[str], **kw) -> subprocess.CompletedProcess:
@@ -189,21 +191,36 @@ def ios_settings():
         ok("already set: " + " ".join(l.split("=")[1].strip() for l in LOCAL_XCCONFIG.read_text().splitlines()
                                       if "=" in l and not l.startswith("//")))
         return
-    say("  You build the app yourself in Xcode, signed with your Apple ID (a free one works: the app then needs "
-        "reinstalling from Xcode every 7 days).")
+    say("  You build the app yourself in Xcode, signed with your Apple ID. A free one may work (the app then expires "
+        "after 7 days); if Xcode says your team can't use App Groups, you need a paid developer account.")
     teams = team_ids()
     team = ""
     if teams:
         for i, (t, n) in enumerate(teams, 1):
             say(f"  {i}) {t}  {n}")
-        pick = ask("Your team (number, or a team ID)", "1")
-        team = teams[int(pick) - 1][0] if pick.isdigit() and 0 < int(pick) <= len(teams) else pick
+        while True:
+            pick = ask("Your team (number, or a team ID)", "1")
+            if pick.isdigit() and 0 < int(pick) <= len(teams):
+                team = teams[int(pick) - 1][0]
+                break
+            if TEAM_ID.match(pick):
+                team = pick
+                break
+            warn("pick a number from the list, or type a 10-character team ID")
     else:
         say(f"  {DIM}No signing certificate yet: in Xcode, Settings → Accounts, add your Apple ID; its Team ID is "
             f"shown there (or leave it empty and pick the team in Xcode).{RESET}")
-        team = ask("Team ID (10 characters, or Enter to skip)")
+        while True:
+            team = ask("Team ID (10 characters, or Enter to skip)").upper()
+            if not team or TEAM_ID.match(team):
+                break
+            warn("a team ID is 10 letters and digits, like ABCDE12345")
     user = re.sub(r"[^a-z0-9]", "", os.environ.get("USER", "me").lower()) or "me"
-    prefix = ask("Bundle ID prefix, reverse DNS that's yours", f"com.{user}")
+    while True:
+        prefix = ask("Bundle ID prefix, reverse DNS that's yours", f"com.{user}")
+        if BUNDLE_PREFIX.match(prefix):
+            break
+        warn("use letters, digits, - and dots, like com.yourname")
     LOCAL_XCCONFIG.write_text(f"DEVELOPMENT_TEAM = {team}\nBUNDLE_PREFIX = {prefix}\n")
     ok(f"wrote {LOCAL_XCCONFIG.relative_to(ROOT)}")
 
