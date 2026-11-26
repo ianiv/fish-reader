@@ -26,7 +26,7 @@ from taggers import make_tagger  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULTS = {"host": "127.0.0.1", "port": 8767, "data_dir": "./data", "voices_dir": None, "voice": None,
-            "idle_unload_minutes": 15, "warm_on_start": False, "tagger": "claude", "claude_model": "sonnet",
+            "idle_unload_minutes": 15, "warm_on_start": False, "continuation": False, "tagger": "claude", "claude_model": "sonnet",
             "token": None}
 MAX_BODY = 6 * 1024 * 1024  # a shared page (html) can be large
 
@@ -241,7 +241,7 @@ def main():
     if cfg.get("warm_on_start"):
         engine.warm()
     tagger = make_tagger(cfg)
-    Handler.reader = Reader(data_dir, engine, tagger, cfg.get("voice"))
+    Handler.reader = Reader(data_dir, engine, tagger, cfg.get("voice"), bool(cfg.get("continuation", False)))
     Handler.engine, Handler.token, Handler.tagger_name, Handler.quiet = engine, cfg["token"], tagger.name, args.quiet
     httpd = ThreadingHTTPServer((cfg["host"], int(cfg["port"])), Handler)
     httpd.daemon_threads = True

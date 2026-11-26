@@ -160,7 +160,8 @@ def check_servers():
         (tmp / "data" / "voices" / "untranscribed" / "voice.json").write_text("{}")
         write_tone(tmp / "data" / "voices" / "untranscribed" / "reference.wav")
         cfg = tmp / "reader.json"
-        cfg.write_text(json.dumps({"port": port, "data_dir": str(tmp / "data"), "voice": "narrator"}))
+        cfg.write_text(json.dumps({"port": port, "data_dir": str(tmp / "data"), "voice": "narrator",
+                                   "continuation": True}))  # (off by default; tested here and below)
         procs.append(subprocess.Popen(
             [sys.executable, str(ROOT / "server" / "server.py"), "--config", str(cfg), "--quiet"],
             env=dict(os.environ, FISH_READER_TAGGER="fake", FISH_READER_ALLOW_HOSTS=f"127.0.0.1:{page_port}",
@@ -276,7 +277,31 @@ def check_servers():
             pages.shutdown()
 
 
+def check_voice_sample():
+    """No library voice and continuation off: parts continue until one is long enough to be the voice sample,
+    then every later part uses that sample and no continuation."""
+    os.environ.update(FISH_READER_FAKE_MODEL="1", FISH_READER_FAKE_DELAY="0.005")
+    from engine import Engine
+    from taggers import FakeTagger
+
+    with tempfile.TemporaryDirectory(prefix="fish-reader-sample-") as tmp:
+        r = pipeline.Reader(Path(tmp), Engine(Path(tmp) / "voices", 0), FakeTagger(), None, continuation=False)
+        a = r.add("https://paywalled.example/sample", html=FIXTURE)
+        deadline = time.time() + 120
+        while (a := r.get(a["id"]))["status"] not in ("done", "error"):
+            assert time.time() < deadline, "voice-sample article didn't finish"
+            time.sleep(0.1)
+        assert a["status"] == "done", a.get("error")
+        parts = a["parts"]
+        k = next(i for i, p in enumerate(parts) if p["duration_s"] >= pipeline.Reader.SAMPLE_MIN_S)
+        assert all(not p.get("voice_sample") for p in parts[:k + 1]) and all(p["continued"] for p in parts[1:k + 1])
+        assert all(p["voice_sample"] == f"part {k}" and not p["continued"] for p in parts[k + 1:]), parts
+        assert len(parts) > k + 1
+    print(f"voice sample: ok (part {k} voices parts {k + 1}-{len(parts) - 1})")
+
+
 if __name__ == "__main__":
     check_rules()
     check_servers()
+    check_voice_sample()
     print("smoke: ok")

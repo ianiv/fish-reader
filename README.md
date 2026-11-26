@@ -104,6 +104,7 @@ use it to impersonate anyone.
 | `voice` | `null` | default narrator (a voice folder name); `null` lets the model pick |
 | `idle_unload_minutes` | 15 | free the model's memory after this long without work (0 = never) |
 | `warm_on_start` | `false` | load the model when the server starts |
+| `continuation` | `false` | render each part as a continuation of the previous one (smoother joins, but emotion can build up from part to part); with `false` each part only uses the voice reference; without a voice, the first part of 8 s or more becomes the article's voice sample |
 | `tagger` | `claude` | `claude` (falls back to `none` when Claude Code isn't installed or logged in) or `none` |
 | `claude_model` | `sonnet` | model for the markup |
 | `token` | generated | the app's password; keep it private |

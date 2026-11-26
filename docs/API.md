@@ -25,7 +25,7 @@ Article:
  status: queued|fetching|extracting|tagging|rendering|paused|done|error|cancelled, step, error, warnings: [str],
  progress: {parts_done, parts_total}, duration_s, audio_url, created, updated, fish_job,
  parts: [{index, text, tagged (null until tagged), status: pending|tagged|rendering|done,
-          continued (rendered as a continuation of part n-1), gain (normalization factor | null), duration_s, start_s (offset in the whole article), audio_url, warnings}]}
+          continued (rendered as a continuation of part n-1), voice_sample ("part k" when part k of this article was the voice reference: no library voice and `continuation` off), gain (normalization factor | null), duration_s, start_s (offset in the whole article), audio_url, warnings}]}
 ```
 
 Pipeline per article: fetch (unless `html` was sent) → extract with trafilatura (title, byline, paragraphs; links,

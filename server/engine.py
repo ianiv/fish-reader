@@ -126,11 +126,12 @@ class Engine:
         if self.model is None and self.state != "loading":
             self._submit(lambda: self._ensure())
 
-    def render(self, text: str, voice: str | None = None, history: list[core.PrevTake] | None = None,
+    def render(self, text: str, voice: str | core.Voice | None = None, history: list[core.PrevTake] | None = None,
                live: Live | None = None, should_cancel=lambda: False) -> tuple[core.Take, list[str]]:
         """One streamed take of `text` (≤ 3000 chars) continuing `history`. Returns (take, warnings).
         Raises core.RequestError for bad input, core.Cancelled when should_cancel() turned true."""
-        items = core.tts_items({"text": text}, self.voice(voice) if voice else None, history or [])
+        v = self.voice(voice) if isinstance(voice, str) else voice  # a library voice id, or a ready Voice
+        items = core.tts_items({"text": text}, v, history or [])
         item = items[0]
         try:
             take = self._submit(lambda: self._render(item, live, should_cancel)).result()

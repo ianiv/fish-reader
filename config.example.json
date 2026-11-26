@@ -6,6 +6,7 @@
   "voice": null,
   "idle_unload_minutes": 15,
   "warm_on_start": false,
+  "continuation": false,
   "tagger": "claude",
   "claude_model": "sonnet",
   "token": null

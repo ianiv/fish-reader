@@ -216,10 +216,14 @@ def new_id() -> str:
 class Reader:
     """Article store plus one worker thread that runs articles in order (the engine renders one take at a time)."""
 
-    def __init__(self, data_dir: Path, engine: Engine, tagger: Tagger, voice: str | None = None):
+    def __init__(self, data_dir: Path, engine: Engine, tagger: Tagger, voice: str | None = None,
+                 continuation: bool = False):
         self.root = Path(data_dir) / "articles"
         self.root.mkdir(parents=True, exist_ok=True)
         self.engine, self.tagger, self.default_voice = engine, tagger, voice
+        # continue each part from the previous one (carries voice and delivery over; can also carry emotion
+        # along and build it up). Without a voice it's always on: it's what keeps the narrator the same.
+        self.continuation = continuation
         self.lives: dict[tuple[str, int], Live] = {}  # parts rendering now
         self.lock = threading.RLock()
         self.wake = threading.Condition(self.lock)
@@ -445,6 +449,20 @@ class Reader:
                 p["status"] = "tagged"
             self._save(a)
 
+    SAMPLE_MIN_S = 8.0  # a voice sample shorter than this gives the model too little to go on
+
+    def _voice_sample(self, a: dict, i: int) -> core.Voice | None:
+        """Part i as the article's voice sample, when it's needed (no library voice, continuation off) and
+        long enough."""
+        p, wav = a["parts"][i], self.dir(a["id"]) / "parts" / f"{i:02d}.wav"
+        if a.get("voice") or self.continuation or (p.get("duration_s") or 0) < self.SAMPLE_MIN_S or not wav.exists():
+            return None
+        try:
+            core.check_text(p["text"])
+        except core.RequestError:
+            return None
+        return core.Voice(id=f"part {i}", audio=str(wav), transcript=p["text"])
+
     def _render_all(self, a: dict):
         d = self.dir(a["id"])
         (d / "parts").mkdir(exist_ok=True)
@@ -452,17 +470,24 @@ class Reader:
         futures = {i: self.tag_pool.submit(self._tag, a, i) for i, p in enumerate(parts) if p["tagged"] is None}
         if futures:
             self.update(a, status="tagging", step="tag")
+        # No library voice and continuation off: the first part long enough becomes the article's voice
+        # sample (its audio + words), so the narrator stays the same without carrying emotion along. Parts up
+        # to that one continue from the previous part instead.
+        sample = None
         for i, p in enumerate(parts):
             self._check(a)
             if i in futures:
                 futures[i].result()
             if p["status"] == "done" and (d / "parts" / f"{i:02d}.m4a").exists():
+                sample = sample or self._voice_sample(a, i)
                 continue
             self.update(a, status="rendering", step="render")
             prev = parts[i - 1] if i else None
             prev_wav = d / "parts" / f"{i - 1:02d}.wav"
             history = []
-            if prev and prev_wav.exists() and (prev["duration_s"] or 99) <= tr.MAX_HISTORY_S:
+            voice = a.get("voice") or (None if self.continuation else sample)
+            if (self.continuation or not voice) and prev and prev_wav.exists() \
+                    and (prev["duration_s"] or 99) <= tr.MAX_HISTORY_S:
                 history = [core.PrevTake(id=f"part {i - 1}", text=prev["tagged"] or prev["text"], wav=str(prev_wav),
                                          duration_s=prev["duration_s"], voices=[a["voice"]] if a.get("voice") else [],
                                          gain=prev.get("gain"))]
@@ -472,7 +497,7 @@ class Reader:
                 self.lives[(a["id"], i)] = live
                 self.wake.notify_all()  # wakes live() waiters
             try:
-                take, warnings = self.engine.render(p["tagged"] or p["text"], a.get("voice"), history, live,
+                take, warnings = self.engine.render(p["tagged"] or p["text"], voice, history, live,
                                                     should_cancel=lambda: a["id"] in self.cancelled)
             except core.Cancelled:
                 raise Cancelled() from None
@@ -487,11 +512,13 @@ class Reader:
             to_m4a(wav, d / "parts" / f"{i:02d}.m4a", f"{a['title']} ({i + 1}/{len(parts)})")
             with self.lock:
                 p.update(status="done", duration_s=round(wav_duration(wav), 3), gain=gain, continued=bool(history),
+                         voice_sample=voice.id if isinstance(voice, core.Voice) else None,
                          audio_url=f"/api/articles/{a['id']}/parts/{i}.m4a", warnings=p["warnings"] + warnings)
                 self._times(a)
                 a["progress"] = {"parts_done": sum(q["status"] == "done" for q in parts), "parts_total": len(parts)}
                 self._save(a)
                 self.wake.notify_all()
+            sample = sample or self._voice_sample(a, i)
         wavs = [d / "parts" / f"{i:02d}.wav" for i in range(len(parts))]
         if all(w.exists() for w in wavs):
             join_m4a(wavs, d / "audio.m4a", a["title"], a.get("site") or "")
