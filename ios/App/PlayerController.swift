@@ -1,4 +1,5 @@
 import AVFoundation
+import UIKit
 import MediaPlayer
 import Observation
 
@@ -524,11 +525,18 @@ final class PlayerController {
         }
     }
 
-    private func updateNowPlaying() {
+    /// The app icon on the lock screen and in Control Center (NowPlayingArtwork.png, rendered from AppIcon.icon).
+    private static let artwork: MPMediaItemArtwork? = {
+        guard let image = UIImage(named: "NowPlayingArtwork") else { return nil }
+        return MPMediaItemArtwork(boundsSize: image.size) { _ in image }
+    }()
+
+        private func updateNowPlaying() {
         guard let a = article else { MPNowPlayingInfoCenter.default().nowPlayingInfo = nil; return }
         MPNowPlayingInfoCenter.default().nowPlayingInfo = [
             MPMediaItemPropertyTitle: a.displayTitle,
             MPMediaItemPropertyArtist: a.byline?.isEmpty == false ? a.byline! : (a.site ?? ""),
+            MPMediaItemPropertyArtwork: Self.artwork as Any,
             // in listening time (audio time / baseSpeed), like the app shows it
             MPMediaItemPropertyPlaybackDuration: max(duration, time) / Double(Self.baseSpeed),
             MPNowPlayingInfoPropertyElapsedPlaybackTime: time / Double(Self.baseSpeed),
