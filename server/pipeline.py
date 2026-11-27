@@ -210,6 +210,24 @@ def join_m4a(wavs: list[Path], dest: Path, title: str = "", artist: str = ""):
 
 # ---------- store + worker ----------
 
+def to_mp3(srcs: list[Path], dest: Path, tags: dict):
+    """One MP3 (mono, ~96 kb/s VBR) from one or more audio files played in order, with ID3 tags."""
+    listing = dest.parent / "mp3-concat.txt"
+    listing.write_text("".join(f"file '{s.resolve()}'\n" for s in srcs))
+    tmp = dest.with_suffix(".tmp.mp3")
+    cmd = ["ffmpeg", "-nostdin", "-loglevel", "error", "-y", "-f", "concat", "-safe", "0", "-i", str(listing),
+           "-c:a", "libmp3lame", "-q:a", "5", "-ac", "1", "-id3v2_version", "3"]
+    for k, v in tags.items():
+        if v:
+            cmd += ["-metadata", f"{k}={v}"]
+    try:
+        subprocess.run(cmd + [str(tmp)], check=True)
+        tmp.replace(dest)
+    finally:
+        listing.unlink(missing_ok=True)
+        tmp.unlink(missing_ok=True)
+
+
 def new_id() -> str:
     return time.strftime("%Y%m%d-%H%M%S-") + secrets.token_hex(3)
 
@@ -232,7 +250,8 @@ class Reader:
         self.wake = threading.Condition(self.lock)
         self.articles: dict[str, dict] = {}
         self.cancelled: set[str] = set()
-        self.pausing: set[str] = set()  # cancelled to pause (keep the article), not to delete
+        self.pausing: set[str] = set()
+        self.mp3_lock = threading.Lock()  # cancelled to pause (keep the article), not to delete
         self.tag_pool = ThreadPoolExecutor(1, thread_name_prefix="tagger")
         for f in sorted(self.root.glob("*/article.json")):
             try:
@@ -374,6 +393,27 @@ class Reader:
                 self.update(a, status="queued", error=None)
                 self.wake.notify_all()
         return self.get(aid)
+
+    def mp3(self, aid: str) -> Path | None:
+        """The finished article as one MP3 (made on first request, then kept). None until it's done."""
+        a = self.get(aid)
+        if not a or a["status"] != "done" or not a["parts"]:
+            return None
+        d = self.dir(aid)
+        dest = d / "audio.mp3"
+        srcs = [d / "audio.m4a"] if (d / "audio.m4a").exists() else \
+            [d / "parts" / f"{i:02d}.m4a" for i in range(len(a["parts"]))]
+        if not all(s.exists() for s in srcs):
+            return None
+        with self.mp3_lock:  # one encode at a time; a second request for the same file waits for it
+            if not dest.exists() or dest.stat().st_mtime < max(s.stat().st_mtime for s in srcs):
+                podcast = a.get("kind") == "podcast"
+                to_mp3(srcs, dest, {"title": a["title"] + (" (podcast)" if podcast else ""),
+                                    "artist": " & ".join(a.get("host_names") or []) if podcast
+                                    else (a.get("byline") or a.get("site") or ""),
+                                    "album": a.get("site") or "fish-reader", "comment": a["url"],
+                                    "genre": "Podcast" if podcast else "Speech"})
+        return dest
 
     def delete(self, aid: str) -> bool:
         with self.lock:

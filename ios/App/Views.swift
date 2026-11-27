@@ -219,6 +219,8 @@ struct ArticleView: View {
     @Environment(PlayerController.self) private var player
 
     @State private var scrolled = false
+    @State private var exporting = false
+    @State private var exported: ExportedFile?
 
     private var article: Article? { store.details[id] ?? store.articles.first { $0.id == id } }
 
@@ -247,6 +249,19 @@ struct ArticleView: View {
         }
         .onChange(of: store.details[id]) { _, a in
             if let a, player.article?.id == a.id { player.open(a) }
+        }
+        .sheet(item: $exported) { f in ShareSheet(url: f.url).presentationDetents([.medium, .large]) }
+    }
+
+    /// Fetch the whole article as one MP3 and offer it in the share sheet (Save to Files, AirDrop, …).
+    private func exportMP3(_ a: Article) async {
+        guard let client = APIClient() else { return }
+        exporting = true
+        defer { exporting = false }
+        do {
+            exported = ExportedFile(url: try await client.mp3(of: a))
+        } catch {
+            store.error = error.localizedDescription
         }
     }
 
@@ -299,8 +314,21 @@ struct ArticleView: View {
         }
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
+                if a.status == .done {
+                    Button { Task { await exportMP3(a) } } label: {
+                        if exporting { ProgressView() } else { Image(systemName: "square.and.arrow.down") }
+                    }
+                    .disabled(exporting)
+                    .accessibilityLabel("Save as MP3")
+                }
+            }
+            ToolbarItem(placement: .topBarTrailing) {
                 Menu {
                     if let u = URL(string: a.url) { Link("Open original", destination: u) }
+                    if a.status == .done {
+                        Button("Save as MP3", systemImage: "square.and.arrow.down") { Task { await exportMP3(a) } }
+                            .disabled(exporting)
+                    }
                     if a.status.isActive {
                         Button("Pause reading", systemImage: "pause.circle") { Task { await store.setPaused(a.id, true) } }
                     } else if a.status == .paused {
@@ -532,4 +560,20 @@ func formatTime(_ audioSeconds: Double) -> String {
     guard s.isFinite, s > 0 else { return "0:00" }
     let t = Int(s.rounded())
     return t >= 3600 ? String(format: "%d:%02d:%02d", t / 3600, t / 60 % 60, t % 60) : String(format: "%d:%02d", t / 60, t % 60)
+}
+
+struct ExportedFile: Identifiable {
+    let url: URL
+    var id: String { url.path }
+}
+
+/// The system share sheet for a file.
+struct ShareSheet: UIViewControllerRepresentable {
+    let url: URL
+
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: [url], applicationActivities: nil)
+    }
+
+    func updateUIViewController(_ vc: UIActivityViewController, context: Context) {}
 }

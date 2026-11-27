@@ -221,6 +221,12 @@ def check_servers():
             assert a["voice"] == "narrator"
             st, hdr, audio = api.call("GET", a["audio_url"], raw=True)
             assert st == 200 and hdr["Content-Type"] == "audio/mp4" and audio[4:8] == b"ftyp", (st, hdr)
+            st, hdr, mp3 = api.call("GET", f"/api/articles/{a['id']}/audio.mp3", raw=True)
+            assert st == 200 and hdr["Content-Type"] == "audio/mpeg" and mp3[:3] == b"ID3", (st, hdr)
+            assert 'filename="The Keeper Comes Home.mp3"' in hdr["Content-Disposition"], hdr
+            mp3_s = float(subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of",
+                                          "csv=p=0", "-"], input=mp3, capture_output=True).stdout or 0)
+            assert abs(mp3_s - total) < 0.6, (mp3_s, total)
             st, hdr, piece = api.call("GET", parts[1]["audio_url"], raw=True, headers={"Range": "bytes=0-99"})
             assert st == 206 and len(piece) == 100 and hdr["Content-Range"].startswith("bytes 0-99/"), hdr
             assert api.status("GET", a["audio_url"], token=False) == 401
@@ -285,8 +291,11 @@ def check_servers():
             assert pod["parts"][0]["text"].startswith("Narrator: ") and "[laughs]" in pod["parts"][0]["tagged"]
             assert "<excited>" in turns[1]["text"] and not any(p["continued"] for p in pod["parts"])
             assert pod["audio_url"] and pod["duration_s"] > 0
+            st, hdr, _ = api.call("GET", f"/api/articles/{pod['id']}/audio.mp3", raw=True)
+            assert st == 200 and "(podcast)" not in hdr["Content-Disposition"], hdr
 
             bad = api.call("POST", "/api/articles", {"url": f"http://127.0.0.1:{page_port}/x"})
+            assert api.status("GET", f"/api/articles/{bad['id']}/audio.mp3") == 409, "not finished: no mp3"
             assert api.call("DELETE", f"/api/articles/{bad['id']}") == {"removed": bad["id"]}
             assert api.status("GET", f"/api/articles/{bad['id']}") == 404
             print(f"servers: ok ({len(parts)} parts, {total:.1f} s, {len(audio)} bytes m4a, "

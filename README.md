@@ -90,6 +90,8 @@ Reader opens and asks to connect. Or type the server address and token it prints
 - **Listen**: it starts while the article is still being made. ±15 s, 0.8–2× speed (pitch-preserving, tuned for
   speech; Drama 3 narrates slowly, so 1× plays at 1.2× and times are shown at that pace), lock screen and AirPods controls, background audio, and it remembers your place. Finished articles
   play offline.
+- **Save as MP3**: the download button on a finished article (or ••• → Save as MP3) makes one MP3 of the whole
+  thing and opens the share sheet: save it to Files, AirDrop it, or send it to another app.
 - **Pause an article** that's being made (swipe right in the library, or the ••• menu) to free the Mac's GPU;
   resume later. If you quit the server, unfinished articles carry on when it starts again.
 - **Podcasts**: choose *Podcast* instead of *Reading* when adding, pick two host voices and a length (about 5,

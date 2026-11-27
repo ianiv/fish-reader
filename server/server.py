@@ -14,6 +14,7 @@ import os
 import re
 import secrets
 import sys
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -88,7 +89,7 @@ class Handler(BaseHTTPRequestHandler):
         self.error(401, "missing or wrong token")
         return False
 
-    def send_file(self, path: Path, ctype: str):
+    def send_file(self, path: Path, ctype: str, filename: str | None = None):
         if not path.is_file():
             return self.error(404, "not ready")
         size = path.stat().st_size
@@ -111,6 +112,10 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self.send_response(200)
         self.send_header("Content-Type", ctype)
+        if filename:
+            ascii_name = re.sub(r"[^A-Za-z0-9 ._-]", "", filename).strip() or "article.mp3"
+            self.send_header("Content-Disposition", f"attachment; filename=\"{ascii_name}\"; "
+                                                    f"filename*=UTF-8''{urllib.parse.quote(filename)}")
         self.send_header("Accept-Ranges", "bytes")
         self.send_header("Content-Length", str(end - start + 1))
         self.end_headers()
@@ -206,6 +211,12 @@ class Handler(BaseHTTPRequestHandler):
                     d = self.reader.dir(aid)
                     if rest == "/audio.m4a":
                         return self.send_file(d / "audio.m4a", "audio/mp4")
+                    if rest == "/audio.mp3":
+                        mp3 = self.reader.mp3(aid)
+                        if not mp3:
+                            return self.error(409, "the article isn't finished yet")
+                        name = re.sub(r'[\\/:*?"<>|]+', " ", a["title"] or "article").strip()[:100]
+                        return self.send_file(mp3, "audio/mpeg", f"{name}.mp3")
                     pm = re.fullmatch(r"/parts/(\d+)\.m4a", rest)
                     if pm:
                         return self.send_file(d / "parts" / f"{int(pm.group(1)):02d}.m4a", "audio/mp4")

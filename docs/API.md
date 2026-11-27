@@ -15,6 +15,7 @@ Server: `server/server.py`, default `127.0.0.1:8767`. Every `/api` request needs
 | `POST /api/articles/<id>/pause` | | article; stops work on it (`paused`, kept across restarts). A running render stops and that part starts over on resume; the model unloads when nothing else is queued |
 | `POST /api/articles/<id>/resume` | | article; re-queues a paused one |
 | `GET /api/articles/<id>/parts/<n>.m4a` | | AAC audio of part n (Range supported); 404 until ready |
+| `GET /api/articles/<id>/audio.mp3` | | the finished article (or podcast) as one MP3 with ID3 tags (title, artist, album), sent as an attachment named after the title; encoded on the first request and kept. 409 until it's done |
 | `GET /api/articles/<id>/audio.m4a` | | the whole article, once `done` |
 | `GET /api/articles/<id>/parts/<n>/live` | | part n as it renders: `application/octet-stream`, raw s16le mono PCM (`X-Sample-Rate: 44100`, `X-Sample-Format: s16le`) from the part's start, closing when the part ends. Waits up to 2 min for the part to start; 409 once it's done (play the m4a) |
 

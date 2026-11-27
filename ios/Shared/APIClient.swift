@@ -84,6 +84,22 @@ struct APIClient {
     }
 
     /// Downloads an audio path (e.g. a part's audio_url) to `dest`, replacing it.
+    /// The finished article as one MP3 in a temporary folder, named after its title (the server encodes it on
+    /// the first request, which can take a few seconds).
+    func mp3(of a: Article) async throws -> URL {
+        var r = request("GET", "/api/articles/\(a.id)/audio.mp3")
+        r.timeoutInterval = 300
+        let (tmp, resp) = try await session.download(for: r)
+        guard (resp as? HTTPURLResponse)?.statusCode == 200 else { throw APIError(message: "The MP3 isn't ready yet.") }
+        let name = a.displayTitle.components(separatedBy: CharacterSet(charactersIn: "/\\:?%*|\"<>")).joined(separator: " ")
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("mp3/\(a.id)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let dest = dir.appendingPathComponent(String(name.prefix(100)).trimmingCharacters(in: .whitespaces) + ".mp3")
+        try? FileManager.default.removeItem(at: dest)
+        try FileManager.default.moveItem(at: tmp, to: dest)
+        return dest
+    }
+
     func download(_ path: String, to dest: URL) async throws {
         let (tmp, resp) = try await session.download(for: request("GET", path))
         guard (resp as? HTTPURLResponse)?.statusCode == 200 else { throw APIError(message: "audio not ready") }
