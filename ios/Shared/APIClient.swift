@@ -54,9 +54,14 @@ struct APIClient {
 
     func article(_ id: String) async throws -> Article { try await send(request("GET", "/api/articles/\(id)"), as: Article.self) }
 
-    func add(url: String, voice: String?, html: String? = nil) async throws -> Article {
+    func add(url: String, voice: String?, html: String? = nil, podcast: PodcastOptions? = nil) async throws -> Article {
         var body: [String: Any] = ["url": url]
         if let voice { body["voice"] = voice }
+        if let podcast {
+            body["kind"] = "podcast"
+            body["hosts"] = podcast.hosts
+            body["length"] = podcast.length
+        }
         if let html { body["html"] = html }
         var r = request("POST", "/api/articles", body: body)
         r.timeoutInterval = 60
@@ -86,4 +91,12 @@ struct APIClient {
         try FileManager.default.createDirectory(at: dest.deletingLastPathComponent(), withIntermediateDirectories: true)
         try FileManager.default.moveItem(at: tmp, to: dest)
     }
+}
+
+/// A podcast instead of a reading: Claude writes a two-host conversation about the article.
+struct PodcastOptions {
+    var hosts: [String]   // two voice ids
+    var length: String    // short | medium | long
+
+    static let lengths = [("short", "Short · 5 min"), ("medium", "Medium · 10 min"), ("long", "Long · 20 min")]
 }

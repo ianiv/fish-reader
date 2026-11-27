@@ -45,6 +45,14 @@ moments need more.
 - Reply with the marked-up text only: no preface, no notes, no code fences."""
 
 
+def _spans() -> str:
+    return ", ".join(f"<{t}>…</{t}>" for t in tr.SPAN_TAGS)
+
+
+def _points() -> str:
+    return ", ".join(f"[{c}]" for c in tr.POINT_CUES)
+
+
 def _prompt(text: str, context: dict) -> str:
     head = [f"Article: {context['title']}" if context.get("title") else "",
             f"Previous passage (context only, do not tag or repeat it):\n{context['before']}" if context.get("before") else ""]
@@ -67,13 +75,15 @@ class ClaudeCliTagger:
         self.model, self.binary, self.timeout = model, binary, timeout
 
     def tag(self, text: str, context: dict) -> str:
-        cmd = [self.binary, "-p", "--output-format", "json", "--model", self.model,
-               "--system-prompt", SYSTEM_PROMPT.format(spans=", ".join(f"<{t}>…</{t}>" for t in tr.SPAN_TAGS),
-                                                       points=", ".join(f"[{c}]" for c in tr.POINT_CUES)),
+        return _clean_answer(self.ask(SYSTEM_PROMPT.format(spans=_spans(), points=_points()), _prompt(text, context)))
+
+    def ask(self, system: str, prompt: str, timeout: float | None = None) -> str:
+        """One `claude -p` call; the answer's text."""
+        cmd = [self.binary, "-p", "--output-format", "json", "--model", self.model, "--system-prompt", system,
                "--tools", "", "--strict-mcp-config", "--setting-sources", "", "--no-session-persistence"]
         env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}  # use the CLI login
-        p = subprocess.run(cmd, input=_prompt(text, context), capture_output=True, text=True,
-                           timeout=self.timeout, env=env, cwd=os.path.expanduser("~"))
+        p = subprocess.run(cmd, input=prompt, capture_output=True, text=True,
+                           timeout=timeout or self.timeout, env=env, cwd=os.path.expanduser("~"))
         if p.returncode != 0:
             raise RuntimeError(f"claude -p failed ({p.returncode}): {(p.stderr or p.stdout).strip()[:300]}")
         try:
@@ -82,7 +92,7 @@ class ClaudeCliTagger:
             raise RuntimeError(f"claude -p: unexpected output {p.stdout[:200]!r}")
         if out.get("is_error"):
             raise RuntimeError(f"claude -p: {str(out.get('result'))[:300]}")
-        return _clean_answer(str(out.get("result", "")))
+        return str(out.get("result", ""))
 
 
 class FakeTagger:
@@ -173,3 +183,83 @@ def tag_checked(tagger: Tagger, text: str, context: dict) -> tuple[str, list[str
         if not problem:
             return re.sub(r"[ \t]+", " ", out).strip(), []
     return text, [f"tagging skipped for this part ({tagger.name}: {problem})"]
+
+
+# --- podcast scripts ---
+
+PODCAST_WORDS = {"short": 700, "medium": 1400, "long": 2800}  # ~5, 10, 20 minutes
+
+PODCAST_PROMPT = """You write the script of a two-host audio conversation about one article, for an expressive \
+text-to-speech model (Fish Audio Drama 3) that performs it with two voices. It must sound like two friends who \
+are genuinely into the topic talking it through, unscripted: NOT like two people reading prepared lines.
+Hosts: A has read the article closely; B has skimmed it and is curious, quick and a bit skeptical.
+
+How real conversation sounds (do all of this):
+- Mostly short turns. Explanations come out in pieces, drawn out by B's questions and reactions, never as a \
+paragraph-long monologue. Now and then a longer turn when someone gets going on a point.
+- Backchannels and reactions as their own short turns: "Mm-hm.", "Yeah.", "Right, right.", "Oh, wow.", "Huh.", \
+"Wait, what?", "No way."
+- Natural disfluency, used lightly: "um", "uh", "I mean", "you know", "like", "so…", restarts ("It's, it's \
+not that simple"), trailing off ("And that's kind of…"), a word repeated for emphasis.
+- Interruptions and finishing each other's thoughts: end a turn with an em dash where the other cuts in \
+("So the clerks just—" / "Lost their jobs? No, actually…").
+- Real feeling: surprise, amusement, mild disagreement, an "aha" moment, a joke or a bit of teasing between the \
+hosts, a callback to something said earlier. Let the energy rise and fall.
+- Plain spoken words: contractions, no written-style phrases ("Furthermore", "In conclusion"), numbers said \
+the way people say them. The hosts never call each other by name and never mention a script, show or episode.
+
+Delivery markup (this is how the emotion reaches the voices, so use it: roughly every second or third turn):
+- Span tags wrap the words said a certain way, then the voice returns to normal: {spans}. They can't nest and \
+close within the turn. E.g. "<laughing>That's ridiculous.</laughing>", "<excited>Okay, this is the good \
+part.</excited>", "<sarcastic>Great, more meetings.</sarcastic>".
+- Point cues mark a sound or a beat at one spot: {points}. E.g. "[laughs] Fair.", "Hm. [pause] I'm not sure \
+that follows."
+
+Content:
+- Stay faithful to the article. No facts, numbers, names, quotes or claims that aren't in it; say when \
+something is the author's view. Opinions and reactions are the hosts' own and sound like it ("I find that kind \
+of wild"). If the article is thin on something, the hosts can say so.
+- Open straight into it with a hook (no "welcome to the show"), naming the subject and the source if given. Cover \
+the main points in a sensible order, with tangents kept short. End with a quick, natural wrap-up.
+- No stage directions, sound effects or anything in parentheses: only what is said, plus the markup above.
+
+Format: one turn per line, starting with "A: " or "B: ". Nothing else: no title, no notes, no markdown.
+Length: about {words} words in total."""
+
+
+class ClaudeScriptWriter:
+    """Writes a podcast script with `claude -p`."""
+
+    def __init__(self, claude: ClaudeCliTagger):
+        self.claude = claude
+
+    def write(self, article: dict, length: str) -> str:
+        head = [f"Title: {article['title']}" if article.get("title") else "",
+                f"Source: {article['site']}" if article.get("site") else "",
+                f"Author: {article['byline']}" if article.get("byline") else ""]
+        body = "\n\n".join(article["paragraphs"])[:80_000]
+        prompt = "\n".join(h for h in head if h) + "\n\n<article>\n" + body + "\n</article>"
+        system = PODCAST_PROMPT.format(spans=_spans(), points=_points(), words=PODCAST_WORDS.get(length, 1400))
+        return self.claude.ask(system, prompt, timeout=600)
+
+
+class FakeScriptWriter:
+    """For tests: the article's sentences, alternating between A and B, with a cue or two."""
+
+    def write(self, article: dict, length: str) -> str:
+        sentences = [s for p in article["paragraphs"] for s in re.split(r"(?<=[.!?])\s+", p) if s.strip()]
+        lines = [f"{'AB'[i % 2]}: {s}" for i, s in enumerate(sentences)]
+        if lines:
+            lines[0] += " [laughs]"
+        if len(lines) > 1:
+            lines[1] = "B: <excited>" + lines[1][3:] + "</excited>"
+        return "Here's the script:\n" + "\n".join(lines)
+
+
+def make_writer(tagger: Tagger):
+    """The podcast script writer that goes with the tagger: Claude when it's available, None when not."""
+    if isinstance(tagger, FakeTagger):
+        return FakeScriptWriter()
+    if isinstance(tagger, ClaudeOrNone):
+        return ClaudeScriptWriter(tagger.claude)
+    return None

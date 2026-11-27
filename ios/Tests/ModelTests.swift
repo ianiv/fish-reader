@@ -58,9 +58,22 @@ final class ModelTests: XCTestCase {
         XCTAssertNil(APIClient(server: "", token: "t"))
     }
 
-    func testFormatTime() {
+    func testFormatTime() {  // audio time shown as listening time at the 1.2× base speed
         XCTAssertEqual(formatTime(0), "0:00")
-        XCTAssertEqual(formatTime(95.4), "1:35")
-        XCTAssertEqual(formatTime(3725), "1:02:05")
+        XCTAssertEqual(formatTime(114), "1:35")
+        XCTAssertEqual(formatTime(4470), "1:02:05")
+    }
+
+    func testUnknownStatusDecodes() throws {
+        let newer = json.replacingOccurrences(of: "\"status\": \"rendering\", \"step\"", with: "\"status\": \"dreaming\", \"step\"")
+        XCTAssertNotEqual(newer, json)
+        XCTAssertTrue(try JSONDecoder.api.decode(Article.self, from: Data(newer.utf8)).status.isActive)
+    }
+
+    func testDecodesPodcast() throws {
+        let pod = json.replacingOccurrences(of: "\"tagger\": \"fake\",", with: "\"tagger\": \"fake\", \"kind\": \"podcast\", \"hosts\": [\"a\", \"b\"], \"host_names\": [\"Ann\", \"Bo\"], \"length\": \"short\",")
+        let a = try JSONDecoder.api.decode(Article.self, from: Data(pod.utf8))
+        XCTAssertTrue(a.isPodcast)
+        XCTAssertEqual(a.hostNames, ["Ann", "Bo"])
     }
 }

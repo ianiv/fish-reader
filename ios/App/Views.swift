@@ -119,7 +119,10 @@ struct ArticleRow: View {
         VStack(alignment: .leading, spacing: 4) {
             Text(article.displayTitle).font(.headline).lineLimit(2)
             HStack(spacing: 6) {
-                if let site = article.site, !site.isEmpty { Text(site) }
+                if article.isPodcast {
+                    Label((article.hostNames ?? []).joined(separator: " & "), systemImage: "mic.fill")
+                        .labelStyle(.titleAndIcon)
+                } else if let site = article.site, !site.isEmpty { Text(site) }
                 StatusBadge(article: article)
                 if let d = article.durationS { Text(formatTime(d)) }
             }
@@ -154,7 +157,7 @@ struct AddArticleView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var url = ""
     @State private var busy = false
-    @State private var voice = ReaderSettings.voice ?? ""  // "" = the server's default
+    @State private var choice = ReadingChoice()
     @State private var voices: [Voice] = []
     var opened: (String) -> Void
 
@@ -168,17 +171,14 @@ struct AddArticleView: View {
                     Text("Members-only posts: open them in Safari while signed in and use Share → Read Aloud instead.")
                 }
                 Section {
-                    Picker("Voice", selection: $voice) {
-                        Text("Server default").tag("")
-                        ForEach(voices) { Text($0.name).tag($0.id) }
-                        if !voice.isEmpty, !voices.contains(where: { $0.id == voice }) { Text(voice).tag(voice) }
-                    }
+                    ReadingOptions(model: choice, voices: voices)
                 } footer: {
-                    Text("Starts on the narrator chosen in Settings.")
+                    Text(choice.podcast ? "Claude writes a conversation about the article for two hosts."
+                                        : "Starts on the narrator chosen in Settings.")
                 }
                 if let e = store.error { Text(e).foregroundStyle(.red).font(.footnote) }
             }
-            .navigationTitle("Add article")
+            .navigationTitle(choice.podcast ? "Make a podcast" : "Add article")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
@@ -186,7 +186,8 @@ struct AddArticleView: View {
                     Button("Read") {
                         busy = true
                         Task {
-                            if let a = await store.add(url: url, voice: voice.isEmpty ? nil : voice) {
+                            if let a = await store.add(url: url, voice: choice.narrator, podcast: choice.options) {
+                                choice.remember()
                                 PlayerController.shared.open(a)
                                 PlayerController.shared.play()  // starts live as soon as the first part renders
                                 dismiss()
@@ -195,15 +196,18 @@ struct AddArticleView: View {
                             busy = false
                         }
                     }
-                    .disabled(busy || URL(string: url)?.scheme?.hasPrefix("http") != true)
+                    .disabled(busy || !choice.canSend || URL(string: url)?.scheme?.hasPrefix("http") != true)
                 }
             }
-            .task { voices = (try? await APIClient()?.voices()) ?? [] }
+            .task {
+                voices = (try? await APIClient()?.voices()) ?? []
+                choice.fillHosts(voices)
+            }
             .onAppear {
                 if url.isEmpty, UIPasteboard.general.hasURLs, let u = UIPasteboard.general.url { url = u.absoluteString }
             }
         }
-        .presentationDetents([.medium])
+        .presentationDetents([.medium, .large])
     }
 }
 
@@ -267,7 +271,8 @@ struct ArticleView: View {
                     }
                     ForEach(a.parts ?? []) { p in
                         PartText(part: p, current: player.article?.id == a.id && player.currentPart == p.index,
-                                 playable: player.article?.id == a.id ? player.canPlay(part: p.index) : p.isReady)
+                                 playable: player.article?.id == a.id ? player.canPlay(part: p.index) : p.isReady,
+                                 hosts: a.hostNames ?? [])
                             .id(p.index)
                             .onTapGesture {
                                 if player.article?.id != a.id { player.open(a) }
@@ -341,6 +346,7 @@ struct PartText: View {
     let part: Article.Part
     let current: Bool
     var playable = true
+    var hosts: [String] = []  // podcast: lines start with "<host>: ", shown in bold
 
     var body: some View {
         Text(attributed)
@@ -359,12 +365,29 @@ struct PartText: View {
         return a
     }
 
+    /// Text with each "<host>: " at a line start in bold.
+    private func withHosts(_ t: String) -> AttributedString {
+        var out = AttributedString()
+        let lines = t.components(separatedBy: "\n")
+        for (i, line) in lines.enumerated() {
+            if i > 0 { out += AttributedString("\n") }
+            if let h = hosts.first(where: { line.hasPrefix("\($0): ") }) {
+                var name = AttributedString(h + ":")
+                name.font = .body.bold()
+                out += name + AttributedString(String(line.dropFirst(h.count + 1)))
+            } else {
+                out += AttributedString(line)
+            }
+        }
+        return out
+    }
+
     private var attributed: AttributedString {
         var out = AttributedString()
         for run in CueText.runs(part.tagged ?? part.text) {
             switch run {
             case .text(let t):
-                out += AttributedString(t)
+                out += hosts.isEmpty ? AttributedString(t) : withHosts(t)
             case .cue(let c):
                 out += label("[\(c)]")
             case .span(let tag, let words):

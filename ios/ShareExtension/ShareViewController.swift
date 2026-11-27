@@ -30,7 +30,7 @@ final class ShareModel {
     var ready = false   // the page is loaded: pick a voice, then Read
     var sending = false
     var sent = false
-    var voice = ReaderSettings.voice ?? ""  // "" = the server's default
+    let choice = ReadingChoice()
     var voices: [Voice] = []
     var done: () -> Void = {}
     private var html: String?
@@ -53,6 +53,7 @@ final class ShareModel {
         ready = true
         state = ""
         voices = (try? await client.voices()) ?? []
+        choice.fillHosts(voices)
     }
 
     func send() async {
@@ -62,7 +63,8 @@ final class ShareModel {
         sending = true
         defer { sending = false }
         do {
-            _ = try await client.add(url: url, voice: voice.isEmpty ? nil : voice, html: html)
+            _ = try await client.add(url: url, voice: choice.narrator, html: html, podcast: choice.options)
+            choice.remember()
             sent = true
             state = "Added. It'll be ready in the Reader app."
             try? await Task.sleep(for: .seconds(1.2))
@@ -83,31 +85,30 @@ struct ShareView: View {
 
     var body: some View {
         NavigationStack {
-            VStack(spacing: 16) {
-                Image(systemName: model.sent ? "checkmark.circle.fill" : "waveform")
-                    .font(.system(size: 44)).foregroundStyle(model.sent ? .green : .accentColor)
-                Text(model.title.isEmpty ? model.url : model.title).font(.headline).multilineTextAlignment(.center).lineLimit(3)
+            Form {
+                Section {
+                    HStack(spacing: 12) {
+                        Image(systemName: model.sent ? "checkmark.circle.fill" : "waveform")
+                            .font(.title).foregroundStyle(model.sent ? .green : .accentColor)
+                        Text(model.title.isEmpty ? model.url : model.title).font(.headline).lineLimit(3)
+                    }
+                }
                 if model.ready && !model.sent {
-                    LabeledContent("Voice") {
-                    Picker("Voice", selection: $model.voice) {
-                        Text("Server default").tag("")
-                        ForEach(model.voices) { Text($0.name).tag($0.id) }
-                        if !model.voice.isEmpty, !model.voices.contains(where: { $0.id == model.voice }) {
-                            Text(model.voice).tag(model.voice)
+                    Section {
+                        ReadingOptions(model: model.choice, voices: model.voices)
+                    }
+                    Section {
+                        Button(model.failed ? "Try again" : (model.choice.podcast ? "Make podcast" : "Read")) {
+                            Task { await model.send() }
                         }
+                        .frame(maxWidth: .infinity)
+                        .disabled(model.sending || !model.choice.canSend)
                     }
-                    .pickerStyle(.menu)
-                    }
-                    .frame(maxWidth: 320)
-                    Button(model.failed ? "Try again" : "Read") { Task { await model.send() } }
-                        .buttonStyle(.borderedProminent).controlSize(.large).disabled(model.sending)
                 }
                 if !model.state.isEmpty {
-                    Text(model.state).font(.subheadline).foregroundStyle(model.failed ? .red : .secondary).multilineTextAlignment(.center)
+                    Text(model.state).font(.subheadline).foregroundStyle(model.failed ? .red : .secondary)
                 }
             }
-            .padding()
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
             .navigationTitle("Read Aloud")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {

@@ -87,6 +87,9 @@ Reader opens and asks to connect. Or type the server address and token it prints
   play offline.
 - **Pause an article** that's being made (swipe right in the library, or the ••• menu) to free the Mac's GPU;
   resume later. If you quit the server, unfinished articles carry on when it starts again.
+- **Podcasts**: choose *Podcast* instead of *Reading* when adding, pick two host voices and a length (about 5,
+  10 or 20 minutes). Claude writes a two-host conversation about the article (sticking to what it says), and
+  Drama 3 performs it with both voices. Needs Claude Code; the script is kept as `script.txt` with the audio.
 - **Voices**: `./fish-reader add-voice` adds another; choose the default in Settings or per article.
 
 **Only use voices you have the right to use**: your own, or someone who agreed to have their voice cloned. Don't
@@ -104,6 +107,7 @@ use it to impersonate anyone.
 | `voice` | `null` | default narrator (a voice folder name); `null` lets the model pick |
 | `idle_unload_minutes` | 15 | free the model's memory after this long without work (0 = never) |
 | `warm_on_start` | `false` | load the model when the server starts |
+| `podcast_hosts` | `[]` | default podcast hosts: two voice ids |
 | `continuation` | `false` | render each part as a continuation of the previous one (smoother joins, but emotion can build up from part to part); with `false` each part only uses the voice reference; without a voice, the first part of 8 s or more becomes the article's voice sample |
 | `tagger` | `claude` | `claude` (falls back to `none` when Claude Code isn't installed or logged in) or `none` |
 | `claude_model` | `sonnet` | model for the markup |

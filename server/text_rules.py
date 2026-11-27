@@ -169,3 +169,73 @@ def split_parts(paragraphs: list[str], limit: int = PART_CHARS, first_limit: int
     if cur:
         parts.append(cur)
     return parts
+
+
+# --- podcast scripts ---
+
+_TURN = re.compile(r"^\s*(?:\*\*)?(?:host\s+|speaker\s+)?([AB])(?:\*\*)?\s*[:：]\s*(?:\*\*)?\s*", re.I)
+
+
+def parse_script(text: str) -> list[tuple[int, str]]:
+    """A two-host script ("A: …" / "B: …" lines) -> [(speaker 0|1, turn text)]. Lines before the first turn
+    (a preamble) are dropped; unprefixed lines after it belong to the turn above."""
+    turns: list[list] = []
+    for line in (text or "").splitlines():
+        m = _TURN.match(line)
+        if m:
+            turns.append([0 if m.group(1).upper() == "A" else 1, line[m.end():].strip()])
+        elif turns and line.strip():
+            turns[-1][1] += " " + line.strip()
+    out = []
+    for spk, t in turns:
+        t = clean_turn(t)
+        if words(t):
+            if out and out[-1][0] == spk:  # two turns in a row by one host: one turn
+                out[-1] = (spk, out[-1][1] + " " + t)
+            else:
+                out.append((spk, t))
+    return out
+
+
+def clean_turn(text: str) -> str:
+    """Keep only markup Drama 3 can use: known point cues and well-formed known span tags (else the tags go and
+    the words stay); no speaker tags, structural tokens, parentheticals, markdown emphasis."""
+    t = re.sub(r"<\|[^|]*\|>", " ", text)
+    for token in STRUCTURAL_TOKENS:
+        t = t.replace(token, " ")
+    t = re.sub(r"\[S\d+\]", " ", t)
+    t = re.sub(r"\[([^\]]*)\]", lambda m: m.group() if m.group(1).strip().lower() in POINT_CUES else " ", t)
+    t = re.sub(r"\((?:[^()]*)\)", lambda m: m.group() if words(m.group()) and not re.match(
+        r"\((?:laugh|sigh|pause|chuckl|music|beat|sound)", m.group(), re.I) else " ", t)
+    t = re.sub(r"\*\*?|__", "", t)
+    if check_spans(t):
+        t = _SPAN.sub("", t)
+    return re.sub(r"\s+", " ", t).strip()
+
+
+def split_turns(turns: list[tuple[int, str]], limit: int = PART_CHARS, first_limit: int | None = None) \
+        -> list[list[tuple[int, str]]]:
+    """Turns -> parts of at most `limit` spoken characters, cut between turns (a longer turn is cut at sentence
+    ends, its pieces staying with the same host). The first part can be shorter (`first_limit`), so audio starts
+    sooner."""
+    pieces = []
+    for spk, t in turns:
+        if len(strip_tags(t)) <= limit:
+            pieces.append((spk, t))
+        else:
+            for piece in _cut(t, limit):
+                pieces.append((spk, piece if not check_spans(piece) else _SPAN.sub("", piece)))
+    parts: list[list[tuple[int, str]]] = []
+    cur: list[tuple[int, str]] = []
+    size = 0
+    for spk, t in pieces:
+        n = len(strip_tags(t))
+        cap = first_limit if (first_limit and not parts) else limit
+        if cur and size + n > cap:
+            parts.append(cur)
+            cur, size = [], 0
+        cur.append((spk, t))
+        size += n
+    if cur:
+        parts.append(cur)
+    return parts

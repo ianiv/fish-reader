@@ -131,8 +131,20 @@ class Engine:
         """One streamed take of `text` (≤ 3000 chars) continuing `history`. Returns (take, warnings).
         Raises core.RequestError for bad input, core.Cancelled when should_cancel() turned true."""
         v = self.voice(voice) if isinstance(voice, str) else voice  # a library voice id, or a ready Voice
-        items = core.tts_items({"text": text}, v, history or [])
-        item = items[0]
+        return self._run_item(core.tts_items({"text": text}, v, history or [])[0], live, should_cancel)
+
+    def render_dialogue(self, turns: list[tuple[int, str]], voices: list[str], live: Live | None = None,
+                        should_cancel=lambda: False) -> tuple[core.Take, list[str]]:
+        """One streamed multi-speaker take: turns [(speaker index, text)], voices[speaker] = library voice id.
+        Speakers are renumbered in the order they first speak: Drama 3 wants 0…n-1 without gaps, and a take
+        that opens with speaker 1 loses that speaker's voice (it reads later turns with speaker 0's)."""
+        present = list(dict.fromkeys(s for s, _ in turns))
+        num = {s: i for i, s in enumerate(present)}
+        script = " ".join(f"<|speaker:{num[s]}|>{t}" for s, t in turns)
+        refs = [self.voice(voices[s]) for s in present]
+        return self._run_item(core.dialogue_items({"script": script}, refs, [])[0], live, should_cancel)
+
+    def _run_item(self, item: core.Item, live: Live | None, should_cancel) -> tuple[core.Take, list[str]]:
         try:
             take = self._submit(lambda: self._render(item, live, should_cancel)).result()
         finally:

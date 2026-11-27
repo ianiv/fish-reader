@@ -26,7 +26,7 @@ from taggers import make_tagger  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULTS = {"host": "127.0.0.1", "port": 8767, "data_dir": "./data", "voices_dir": None, "voice": None,
-            "idle_unload_minutes": 15, "warm_on_start": False, "continuation": False, "tagger": "claude", "claude_model": "sonnet",
+            "idle_unload_minutes": 15, "warm_on_start": False, "continuation": False, "podcast_hosts": [], "tagger": "claude", "claude_model": "sonnet",
             "token": None}
 MAX_BODY = 6 * 1024 * 1024  # a shared page (html) can be large
 
@@ -177,8 +177,11 @@ class Handler(BaseHTTPRequestHandler):
                 voice, page = b.get("voice"), b.get("html")
                 if page is not None and (not isinstance(page, str) or not page.strip()):
                     return self.error(400, "html must be the page source")
-                return self.send_json(self.reader.add(url, voice if isinstance(voice, str) and voice else None,
-                                                      page), 201)
+                hosts = b.get("hosts")
+                return self.send_json(self.reader.add(url, voice if isinstance(voice, str) and voice else None, page,
+                                                      kind=b.get("kind") or "article",
+                                                      hosts=hosts if isinstance(hosts, list) else None,
+                                                      length=b.get("length") or "medium"), 201)
             am = re.fullmatch(r"/api/articles/([\w-]+)(/.*)?", path)
             if am:
                 aid, rest = am.group(1), am.group(2) or ""
@@ -215,7 +218,8 @@ class Handler(BaseHTTPRequestHandler):
 
 def summary(a: dict) -> dict:
     return {k: a.get(k) for k in ("id", "url", "title", "site", "byline", "status", "error", "created", "updated",
-                                  "progress", "duration_s", "audio_url", "voice")}
+                                  "progress", "duration_s", "audio_url", "voice", "kind", "hosts", "host_names",
+                                  "length")}
 
 
 def main():
@@ -241,7 +245,8 @@ def main():
     if cfg.get("warm_on_start"):
         engine.warm()
     tagger = make_tagger(cfg)
-    Handler.reader = Reader(data_dir, engine, tagger, cfg.get("voice"), bool(cfg.get("continuation", False)))
+    Handler.reader = Reader(data_dir, engine, tagger, cfg.get("voice"), bool(cfg.get("continuation", False)),
+                            cfg.get("podcast_hosts") or [])
     Handler.engine, Handler.token, Handler.tagger_name, Handler.quiet = engine, cfg["token"], tagger.name, args.quiet
     httpd = ThreadingHTTPServer((cfg["host"], int(cfg["port"])), Handler)
     httpd.daemon_threads = True

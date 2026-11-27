@@ -18,17 +18,31 @@ struct Article: Codable, Identifiable, Hashable {
     var warnings: [String]?
     var source: String?
     var parts: [Part]?
+    var kind: String?         // "article" (default) | "podcast"
+    var hosts: [String]?      // podcast: the two host voice ids
+    var hostNames: [String]?
+    var length: String?       // podcast: short | medium | long
+
+    var isPodcast: Bool { kind == "podcast" }
 
     enum Status: String, Codable {
-        case queued, fetching, extracting, tagging, rendering, paused, done, error, cancelled
+        case queued, fetching, extracting, scripting, tagging, rendering, paused, done, error, cancelled
 
-        var isActive: Bool { [.queued, .fetching, .extracting, .tagging, .rendering].contains(self) }
+        var isActive: Bool { [.queued, .fetching, .extracting, .scripting, .tagging, .rendering].contains(self) }
+
+        /// A status from a newer server that this app doesn't know: shown as working, instead of the whole
+        /// article (and so the library) failing to decode.
+        init(from decoder: Decoder) throws {
+            let raw = try decoder.singleValueContainer().decode(String.self)
+            self = Status(rawValue: raw) ?? .rendering
+        }
 
         var label: String {
             switch self {
             case .queued: "Queued"
             case .fetching: "Fetching"
             case .extracting: "Finding the article"
+            case .scripting: "Writing the script"
             case .tagging: "Adding expression"
             case .rendering: "Reading aloud"
             case .paused: "Paused"

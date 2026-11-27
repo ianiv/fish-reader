@@ -25,9 +25,10 @@ from pathlib import Path
 import fish_core as core
 import text_rules as tr
 from engine import Engine, EngineError, Live, write_wav
-from taggers import Tagger, tag_checked
+from taggers import PODCAST_WORDS, ClaudeOrNone, Tagger, make_writer, tag_checked
 
-ACTIVE = ("queued", "fetching", "extracting", "tagging", "rendering")
+ACTIVE = ("queued", "fetching", "extracting", "scripting", "tagging", "rendering")
+KINDS = ("article", "podcast")
 MAX_BYTES = 5 * 1024 * 1024
 MIN_CHARS = 300
 UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) "
@@ -217,13 +218,15 @@ class Reader:
     """Article store plus one worker thread that runs articles in order (the engine renders one take at a time)."""
 
     def __init__(self, data_dir: Path, engine: Engine, tagger: Tagger, voice: str | None = None,
-                 continuation: bool = False):
+                 continuation: bool = False, hosts: list[str] | None = None):
         self.root = Path(data_dir) / "articles"
         self.root.mkdir(parents=True, exist_ok=True)
         self.engine, self.tagger, self.default_voice = engine, tagger, voice
         # continue each part from the previous one (carries voice and delivery over; can also carry emotion
         # along and build it up). Without a voice it's always on: it's what keeps the narrator the same.
         self.continuation = continuation
+        self.writer = make_writer(tagger)  # podcast scripts
+        self.default_hosts = hosts or []
         self.lives: dict[tuple[str, int], Live] = {}  # parts rendering now
         self.lock = threading.RLock()
         self.wake = threading.Condition(self.lock)
@@ -269,8 +272,25 @@ class Reader:
             return sorted((json.loads(json.dumps(a)) for a in self.articles.values()),
                           key=lambda a: a["created"], reverse=True)
 
-    def add(self, url: str, voice: str | None = None, html: str | None = None) -> dict:
-        """html: the page as the phone saw it (Safari share sheet, signed in), used instead of fetching."""
+    def add(self, url: str, voice: str | None = None, html: str | None = None, kind: str = "article",
+            hosts: list[str] | None = None, length: str = "medium") -> dict:
+        """html: the page as the phone saw it (Safari share sheet, signed in), used instead of fetching.
+        kind "podcast": Claude writes a two-host conversation about the article, read by `hosts` (two voice ids;
+        default config podcast_hosts), about `length` long (short | medium | long)."""
+        if kind not in KINDS:
+            raise StepError(f"kind must be one of {', '.join(KINDS)}")
+        if kind == "podcast":
+            hosts = hosts or self.default_hosts
+            if not isinstance(hosts, list) or len(hosts) != 2 or not all(isinstance(h, str) and h for h in hosts):
+                raise StepError("a podcast needs two host voices")
+            for h in hosts:
+                v = self.engine.voice(h)  # raises for a missing voice
+                if not v.transcript:
+                    raise StepError(f"voice '{h}' has no transcript")
+            if length not in PODCAST_WORDS:
+                raise StepError(f"length must be one of {', '.join(PODCAST_WORDS)}")
+            if self.writer is None:
+                raise StepError("podcasts need the Claude tagger (tagger: claude in config.json)")
         if html is None:
             check_url(url)
         elif not urllib.parse.urlsplit(url.strip()).scheme in ("http", "https"):
@@ -279,7 +299,10 @@ class Reader:
              "status": "queued", "step": None, "error": None, "warnings": [], "created": time.time(),
              "voice": voice if voice is not None else self.default_voice, "tagger": self.tagger.name,
              "source": "fetched", "parts": [], "duration_s": None, "audio_url": None,
-             "progress": {"parts_done": 0, "parts_total": 0}}
+             "progress": {"parts_done": 0, "parts_total": 0}, "kind": kind}
+        if kind == "podcast":
+            names = {v["id"]: v["name"] for v in self.engine.voices()}
+            a.update(voice=None, hosts=hosts, host_names=[names.get(h, h) for h in hosts], length=length)
         threading.Thread(target=self._warm, daemon=True).start()
         with self.lock:
             self._save(a)
@@ -421,6 +444,8 @@ class Reader:
             self._check(a)
             self.update(a, status="extracting", step="extract")
             art = extract(src.read_text(), a.get("final_url") or a["url"])
+            if a.get("kind") == "podcast":
+                return self._script(a, art)
             # The title and byline are a tiny untagged first part, so rendering (and the phone's live stream)
             # starts right after extraction while Claude tags the short first body part.
             intro = ([art["title"] + ("" if re.search(r"[.!?…]$", art["title"]) else ".")] if art["title"] else [])
@@ -435,6 +460,36 @@ class Reader:
                                 "warnings": []}
                                for i, t in enumerate(texts)],
                         progress={"parts_done": 0, "parts_total": len(texts)})
+        self._render_all(a)
+
+    def _script(self, a: dict, art: dict):
+        """Podcast: Claude writes the conversation, which is cut into parts between turns, then rendered."""
+        d = self.dir(a["id"])
+        self.update(a, title=art["title"] or a["url"], byline=art["byline"], site=art["site"], date=art["date"],
+                    status="scripting", step="script")
+        if isinstance(self.tagger, ClaudeOrNone) and self.tagger.problem:
+            raise StepError(f"podcasts need Claude: {self.tagger.problem}")
+        try:
+            script = self.writer.write(art, a.get("length") or "medium")
+        except Exception as e:  # noqa: BLE001
+            raise StepError(f"writing the script failed: {e}") from None
+        self._check(a)
+        (d / "script.txt").write_text(script)
+        turns = tr.parse_script(script)
+        if len(turns) < 2 or {s for s, _ in turns} != {0, 1}:
+            raise StepError("Claude didn't write a usable two-host script (see script.txt)")
+        names = a.get("host_names") or ["A", "B"]
+
+        def show(t: list, tagged: bool) -> str:
+            return "\n\n".join(f"{names[s]}: {x if tagged else re.sub(r'\s+', ' ', tr.strip_tags(x)).strip()}"
+                                for s, x in t)
+
+        groups = tr.split_turns(turns, first_limit=tr.FIRST_PART_CHARS)
+        self.update(a, parts=[{"index": i, "turns": [{"speaker": s, "text": x} for s, x in g],
+                               "text": show(g, False), "tagged": show(g, True), "status": "tagged",
+                               "continued": False, "gain": None, "duration_s": None, "start_s": None,
+                               "audio_url": None, "warnings": []} for i, g in enumerate(groups)],
+                    progress={"parts_done": 0, "parts_total": len(groups)})
         self._render_all(a)
 
     def _tag(self, a: dict, i: int) -> None:
@@ -455,7 +510,8 @@ class Reader:
         """Part i as the article's voice sample, when it's needed (no library voice, continuation off) and
         long enough."""
         p, wav = a["parts"][i], self.dir(a["id"]) / "parts" / f"{i:02d}.wav"
-        if a.get("voice") or self.continuation or (p.get("duration_s") or 0) < self.SAMPLE_MIN_S or not wav.exists():
+        if a.get("kind") == "podcast" or a.get("voice") or self.continuation \
+                or (p.get("duration_s") or 0) < self.SAMPLE_MIN_S or not wav.exists():
             return None
         try:
             core.check_text(p["text"])
@@ -486,7 +542,7 @@ class Reader:
             prev_wav = d / "parts" / f"{i - 1:02d}.wav"
             history = []
             voice = a.get("voice") or (None if self.continuation else sample)
-            if (self.continuation or not voice) and prev and prev_wav.exists() \
+            if a.get("kind") != "podcast" and (self.continuation or not voice) and prev and prev_wav.exists() \
                     and (prev["duration_s"] or 99) <= tr.MAX_HISTORY_S:
                 history = [core.PrevTake(id=f"part {i - 1}", text=prev["tagged"] or prev["text"], wav=str(prev_wav),
                                          duration_s=prev["duration_s"], voices=[a["voice"]] if a.get("voice") else [],
@@ -497,8 +553,13 @@ class Reader:
                 self.lives[(a["id"], i)] = live
                 self.wake.notify_all()  # wakes live() waiters
             try:
-                take, warnings = self.engine.render(p["tagged"] or p["text"], voice, history, live,
-                                                    should_cancel=lambda: a["id"] in self.cancelled)
+                if a.get("kind") == "podcast":
+                    take, warnings = self.engine.render_dialogue([(t["speaker"], t["text"]) for t in p["turns"]],
+                                                                 a["hosts"], live,
+                                                                 should_cancel=lambda: a["id"] in self.cancelled)
+                else:
+                    take, warnings = self.engine.render(p["tagged"] or p["text"], voice, history, live,
+                                                        should_cancel=lambda: a["id"] in self.cancelled)
             except core.Cancelled:
                 raise Cancelled() from None
             except core.RequestError as e:

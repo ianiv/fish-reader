@@ -7,7 +7,7 @@ Server: `server/server.py`, default `127.0.0.1:8767`. Every `/api` request needs
 |---|---|---|
 | `GET /api/health` | | `{ok, model: {key: "drama3", state: empty\|loading\|warming\|ready\|idle-unloaded\|error, error, load_s, warm_s, busy, pending, rtf, fake}, tagger}` |
 | `GET /api/voices` | | `{voices: [{id, name, description}]}` (voices in `voices_dir` that have a transcript) |
-| `POST /api/articles` | `{url, voice?, html?}` | 201 article. `html` = the page as the phone saw it (share sheet), used instead of fetching (members-only posts). 400 for non-http(s) URLs, or (without `html`) hosts that resolve to private/local addresses |
+| `POST /api/articles` | `{url, voice?, html?, kind?, hosts?, length?}` | 201 article. `html` = the page as the phone saw it (share sheet), used instead of fetching (members-only posts). `kind: "podcast"` makes a two-host conversation instead of a reading: `hosts` = two voice ids (default config `podcast_hosts`), `length` = `short` \| `medium` \| `long` (~5/10/20 min); needs the Claude tagger. 400 for non-http(s) URLs, or (without `html`) hosts that resolve to private/local addresses |
 | `GET /api/articles` | | `{articles: [summary]}` newest first; summary = article without `parts`, `warnings` |
 | `GET /api/articles/<id>` | | article |
 | `DELETE /api/articles/<id>` | | `{removed}`; stops its render after the current piece |
@@ -22,10 +22,10 @@ Article:
 
 ```
 {id, url, final_url?, source: fetched|shared, title, byline, site, date, voice, tagger,
- status: queued|fetching|extracting|tagging|rendering|paused|done|error|cancelled, step, error, warnings: [str],
+ status: queued|fetching|extracting|scripting|tagging|rendering|paused|done|error|cancelled, kind: article|podcast, hosts, host_names, length (podcasts), step, error, warnings: [str],
  progress: {parts_done, parts_total}, duration_s, audio_url, created, updated, fish_job,
  parts: [{index, text, tagged (null until tagged), status: pending|tagged|rendering|done,
-          continued (rendered as a continuation of part n-1), voice_sample ("part k" when part k of this article was the voice reference: no library voice and `continuation` off), gain (normalization factor | null), duration_s, start_s (offset in the whole article), audio_url, warnings}]}
+          turns (podcasts: [{speaker: 0|1, text}]; text/tagged then read "<host name>: …" per turn), continued (rendered as a continuation of part n-1), voice_sample ("part k" when part k of this article was the voice reference: no library voice and `continuation` off), gain (normalization factor | null), duration_s, start_s (offset in the whole article), audio_url, warnings}]}
 ```
 
 Pipeline per article: fetch (unless `html` was sent) → extract with trafilatura (title, byline, paragraphs; links,

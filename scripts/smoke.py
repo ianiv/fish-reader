@@ -21,6 +21,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "server"))
+os.environ.update(FISH_READER_FAKE_MODEL="1", FISH_READER_FAKE_DELAY="0.005")  # before fish_core is imported:
+# the in-process tests must never load the real model
 
 import pipeline  # noqa: E402
 import taggers  # noqa: E402
@@ -156,6 +158,11 @@ def check_servers():
         (voice / "voice.json").write_text(json.dumps({"name": "Narrator", "description": "test tone"}))
         (voice / "transcript.txt").write_text("Hello there.\n")
         write_tone(voice / "reference.wav")
+        cohost = tmp / "data" / "voices" / "cohost"
+        cohost.mkdir()
+        (cohost / "voice.json").write_text(json.dumps({"name": "Cohost"}))
+        (cohost / "transcript.txt").write_text("Hi, I'm the other one.\n")
+        write_tone(cohost / "reference.wav")
         (tmp / "data" / "voices" / "untranscribed").mkdir()
         (tmp / "data" / "voices" / "untranscribed" / "voice.json").write_text("{}")
         write_tone(tmp / "data" / "voices" / "untranscribed" / "reference.wav")
@@ -182,7 +189,8 @@ def check_servers():
             assert Api(port, "wrong").status("GET", "/api/articles") == 401
             assert api.status("POST", "/api/articles", {"url": "http://127.0.0.1:1/"}) == 400, "SSRF guard"
             assert api.status("POST", "/api/articles", {}) == 400
-            assert api.call("GET", "/api/voices")["voices"] == [{"id": "narrator", "name": "Narrator", "description": "test tone"}]
+            assert api.call("GET", "/api/voices")["voices"] == [{"id": "cohost", "name": "Cohost", "description": ""},
+                                                                {"id": "narrator", "name": "Narrator", "description": "test tone"}]
 
             a = api.call("POST", "/api/articles", {"url": f"http://127.0.0.1:{page_port}/keeper"})
             assert a["status"] == "queued", a
@@ -258,6 +266,26 @@ def check_servers():
                 assert x["status"] == "done" and all(p["status"] == "done" for p in x["parts"]), x.get("error")
             paused_run = run["status"] == "paused"
 
+            # podcast: the (fake) writer's two-host script, cut between turns, read with both host voices
+            assert api.status("POST", "/api/articles", {"url": "https://paywalled.example/pod", "html": FIXTURE,
+                                                        "kind": "podcast", "hosts": ["narrator"]}) == 400
+            assert api.status("POST", "/api/articles", {"url": "https://paywalled.example/pod", "html": FIXTURE,
+                                                        "kind": "podcast", "hosts": ["narrator", "nobody"]}) == 400
+            pod = api.call("POST", "/api/articles", {"url": "https://paywalled.example/pod", "html": FIXTURE,
+                                                     "kind": "podcast", "hosts": ["narrator", "cohost"],
+                                                     "length": "short"})
+            assert pod["kind"] == "podcast" and pod["host_names"] == ["Narrator", "Cohost"], pod
+            while (pod := api.call("GET", f"/api/articles/{pod['id']}"))["status"] not in ("done", "error"):
+                time.sleep(0.2)
+            assert pod["status"] == "done", pod.get("error")
+            turns = [t for p in pod["parts"] for t in p["turns"]]
+            assert {t["speaker"] for t in turns} == {0, 1} and len(pod["parts"]) >= 2, pod["parts"]
+            assert all(len(tr.strip_tags(" ".join(t["text"] for t in p["turns"]))) <= tr.PART_CHARS
+                       for p in pod["parts"])
+            assert pod["parts"][0]["text"].startswith("Narrator: ") and "[laughs]" in pod["parts"][0]["tagged"]
+            assert "<excited>" in turns[1]["text"] and not any(p["continued"] for p in pod["parts"])
+            assert pod["audio_url"] and pod["duration_s"] > 0
+
             bad = api.call("POST", "/api/articles", {"url": f"http://127.0.0.1:{page_port}/x"})
             assert api.call("DELETE", f"/api/articles/{bad['id']}") == {"removed": bad["id"]}
             assert api.status("GET", f"/api/articles/{bad['id']}") == 404
@@ -280,11 +308,11 @@ def check_servers():
 def check_voice_sample():
     """No library voice and continuation off: parts continue until one is long enough to be the voice sample,
     then every later part uses that sample and no continuation."""
-    os.environ.update(FISH_READER_FAKE_MODEL="1", FISH_READER_FAKE_DELAY="0.005")
     from engine import Engine
     from taggers import FakeTagger
 
     with tempfile.TemporaryDirectory(prefix="fish-reader-sample-") as tmp:
+        assert pipeline.core.FAKE, "the in-process test would load the real model"
         r = pipeline.Reader(Path(tmp), Engine(Path(tmp) / "voices", 0), FakeTagger(), None, continuation=False)
         a = r.add("https://paywalled.example/sample", html=FIXTURE)
         deadline = time.time() + 120

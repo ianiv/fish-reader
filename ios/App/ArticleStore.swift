@@ -37,10 +37,10 @@ final class ArticleStore {
         }
     }
 
-    func add(url: String, voice: String? = ReaderSettings.voice) async -> Article? {
+    func add(url: String, voice: String? = ReaderSettings.voice, podcast: PodcastOptions? = nil) async -> Article? {
         guard let client else { error = "Set the server in Settings first."; return nil }
         do {
-            let a = try await client.add(url: url, voice: voice)
+            let a = try await client.add(url: url, voice: voice, podcast: podcast)
             articles.insert(a, at: 0)
             details[a.id] = a
             error = nil

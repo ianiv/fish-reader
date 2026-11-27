@@ -17,6 +17,17 @@ enum ReaderSettings {
         set { defaults.set(newValue, forKey: "voice") }
     }
 
+    /// Podcast defaults: the last hosts and length used.
+    static var podcastHosts: [String] {
+        get { defaults.stringArray(forKey: "podcastHosts") ?? [] }
+        set { defaults.set(newValue, forKey: "podcastHosts") }
+    }
+
+    static var podcastLength: String {
+        get { defaults.string(forKey: "podcastLength") ?? "medium" }
+        set { defaults.set(newValue, forKey: "podcastLength") }
+    }
+
     static var token: String {
         get { Keychain.read("token") ?? "" }
         set { Keychain.write("token", newValue.trimmingCharacters(in: .whitespacesAndNewlines)) }
