@@ -31,8 +31,15 @@ Article:
 Pipeline per article: fetch (unless `html` was sent) → extract with trafilatura (title, byline, paragraphs; links,
 footnote markers, long bullet lists and citations dropped) → split into parts of ≤ 850 characters at paragraph
 or sentence ends (spoken title and byline first) → tag each part (one part ahead of rendering) → one streamed
-Drama 3 take per part (`engine.py`), each continuing from the previous part's WAV and text (≤ 90 s) →
-`parts/NN.m4a` → `audio.m4a`. Files: `data/articles/<id>/{article.json, source.html, parts/NN.wav (until joined), parts/NN.m4a, audio.m4a}`. Unfinished
+Drama 3 take per part (`engine.py`) with the article's voice (with `continuation` on, also continuing from the
+previous part's WAV and text, ≤ 90 s; with no voice, the first part of 8 s or more becomes the voice sample) →
+`parts/NN.m4a` → `audio.m4a`.
+
+Podcasts: fetch → extract → `scripting`: Claude (`taggers.ClaudeScriptWriter`, one `claude -p` call) writes the
+conversation as `A:`/`B:` lines, saved as `script.txt` → `text_rules.parse_script` keeps known markup only and
+joins consecutive lines by one host → split into parts of ≤ 400 characters (`PODCAST_PART_CHARS`) between turns
+(a longer turn is cut at sentence ends) → one multi-speaker take per part (`Engine.render_dialogue`), speakers
+numbered in the order they first speak in that part, each with its host's voice reference. Files: `data/articles/<id>/{article.json, source.html, parts/NN.wav (until joined), parts/NN.m4a, audio.m4a}`. Unfinished
 articles resume on restart.
 
 Tagging: the tagger may only insert `text_rules.SPAN_TAGS` spans (`<tag>…</tag>`, balanced, not nested, within one

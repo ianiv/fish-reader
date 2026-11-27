@@ -1,7 +1,8 @@
 # fish-reader
 
 Listen to web articles on your iPhone, read aloud with expression by
-[Fish Audio Drama 3](https://huggingface.co/fishaudio/drama-3) running on your own Mac.
+[Fish Audio Drama 3](https://huggingface.co/fishaudio/drama-3) running on your own Mac, or turned into a
+two-host podcast conversation about the article.
 
 ```
 iPhone app ──HTTPS over your tailnet──▶ fish-reader server on your Mac (runs Drama 3)
@@ -12,8 +13,11 @@ iPhone app ──HTTPS over your tailnet──▶ fish-reader server on your Mac
 2. The server finds the article text, leaving out menus, ads, comments and reference lists.
 3. Claude (optional, through the Claude Code CLI and its own login) marks up the delivery without changing a
    word: `<whisper>…</whisper>`, `<sad>…</sad>`, `[sighs]`, `[pause]` and so on.
-4. Drama 3 reads it in parts of about 70 s, each continuing from the last so the voice carries on. The phone
-   starts playing about a second after the first part starts rendering.
+4. Drama 3 reads it in your chosen voice, in parts of about 70 s. The phone starts playing about a second
+   after the first part starts rendering, and keeps going while the rest is made.
+
+Or choose **Podcast**: Claude writes a lively conversation about the article for two hosts (two of your voices),
+sticking to what the article says, and Drama 3 performs it with both voices, about 5, 10 or 20 minutes long.
 
 Everything stays on your devices: the server only listens on the Mac itself, and Tailscale makes it reachable
 from your phone and nobody else.
@@ -27,8 +31,9 @@ from your phone and nobody else.
 - **[Tailscale](https://tailscale.com/download)** on the Mac and the iPhone, signed in to the same account (free
   for personal use).
 - [Homebrew](https://brew.sh) for the tools: `brew install uv ffmpeg xcodegen`
-- Optional: **[Claude Code](https://claude.com/claude-code)**, logged in (run `claude` once). Without it articles
-  are read without the expressive markup.
+- Optional: **[Claude Code](https://claude.com/claude-code)** with a Claude account, logged in on the Mac (run
+  `claude` once). It adds the expressive markup and writes podcasts; without it articles are read plainly and
+  podcasts aren't available.
 
 ## Set up the Mac
 
@@ -80,16 +85,19 @@ Reader opens and asks to connect. Or type the server address and token it prints
 
 ## Using it
 
-- **Add an article**: `+` in the app (it offers a copied link), or Safari → Share → **Reader**. Both let you pick
-  the voice. Use Share for paid posts you're signed in to.
+- **Add an article**: `+` in the app (it offers a copied link), or Safari → Share → **Reader**. Both let you
+  choose *Reading* or *Podcast* and the voices. Use Share for paid posts you're signed in to.
 - **Listen**: it starts while the article is still being made. ±15 s, 0.8–2× speed (pitch-preserving, tuned for
-  speech), lock screen and AirPods controls, background audio, and it remembers your place. Finished articles
+  speech; Drama 3 narrates slowly, so 1× plays at 1.2× and times are shown at that pace), lock screen and AirPods controls, background audio, and it remembers your place. Finished articles
   play offline.
 - **Pause an article** that's being made (swipe right in the library, or the ••• menu) to free the Mac's GPU;
   resume later. If you quit the server, unfinished articles carry on when it starts again.
 - **Podcasts**: choose *Podcast* instead of *Reading* when adding, pick two host voices and a length (about 5,
-  10 or 20 minutes). Claude writes a two-host conversation about the article (sticking to what it says), and
-  Drama 3 performs it with both voices. Needs Claude Code; the script is kept as `script.txt` with the audio.
+  10 or 20 minutes; your last choices are remembered). Claude writes a natural two-host conversation (short
+  turns, reactions, laughs, the odd interruption) that sticks to what the article says, and Drama 3 performs it
+  with both voices. The text view shows who says what. Needs Claude Code; the script is kept as `script.txt`
+  with the audio. Podcasts are made in shorter parts (about 35 s), because in a long multi-speaker take a very
+  short reply can come out in the other host's voice.
 - **Voices**: `./fish-reader add-voice` adds another; choose the default in Settings or per article.
 
 **Only use voices you have the right to use**: your own, or someone who agreed to have their voice cloned. Don't
