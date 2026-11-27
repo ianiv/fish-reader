@@ -484,7 +484,7 @@ class Reader:
             return "\n\n".join(f"{names[s]}: {x if tagged else re.sub(r'\s+', ' ', tr.strip_tags(x)).strip()}"
                                 for s, x in t)
 
-        groups = tr.split_turns(turns, first_limit=tr.FIRST_PART_CHARS)
+        groups = tr.split_turns(turns, limit=tr.PODCAST_PART_CHARS)
         self.update(a, parts=[{"index": i, "turns": [{"speaker": s, "text": x} for s, x in g],
                                "text": show(g, False), "tagged": show(g, True), "status": "tagged",
                                "continued": False, "gain": None, "duration_s": None, "start_s": None,

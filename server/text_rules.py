@@ -9,6 +9,8 @@ from fish_core import MAX_HISTORY_S, MAX_JOB_CHARS, STRUCTURAL_TOKENS  # noqa: F
 
 PART_CHARS = 850          # reader part size before cues: measured ~12 chars/s untagged (1084 chars = 89.5 s), so
                           # ~70 s, leaving room for pauses and slow spans under MAX_HISTORY_S (90 s) for continuation
+PODCAST_PART_CHARS = 400  # podcast parts (~35 s): in a long multi-speaker take, short replies late in it can come
+                          # out in the other host's voice; podcast joins fall between turns, so short parts cost little
 FIRST_PART_CHARS = 400    # the first body part is short so its tagging (and so the first words) come quickly
 
 # Point cues: an event at one spot ([sighs] Fine.). sighs/laughs are the model card's examples.

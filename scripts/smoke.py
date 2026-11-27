@@ -280,7 +280,7 @@ def check_servers():
             assert pod["status"] == "done", pod.get("error")
             turns = [t for p in pod["parts"] for t in p["turns"]]
             assert {t["speaker"] for t in turns} == {0, 1} and len(pod["parts"]) >= 2, pod["parts"]
-            assert all(len(tr.strip_tags(" ".join(t["text"] for t in p["turns"]))) <= tr.PART_CHARS
+            assert all(len(tr.strip_tags(" ".join(t["text"] for t in p["turns"]))) <= tr.PODCAST_PART_CHARS
                        for p in pod["parts"])
             assert pod["parts"][0]["text"].startswith("Narrator: ") and "[laughs]" in pod["parts"][0]["tagged"]
             assert "<excited>" in turns[1]["text"] and not any(p["continued"] for p in pod["parts"])
